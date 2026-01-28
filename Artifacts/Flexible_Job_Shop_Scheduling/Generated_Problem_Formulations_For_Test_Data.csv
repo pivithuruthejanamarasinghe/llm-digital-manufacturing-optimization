@@ -1,0 +1,3686 @@
+prompt,completion,result,index_numbers,generated_code
+"We need to develop a schedule for Shiny Factory that focuses on minimizing makespan. The job information is available in the source.txt file. However, there's an added complexity: the jobs have random release times. Please incorporate this detail into your optimization approach. Once the problem is solved, ensure that the solutions are printed and visually represented for thorough evaluation.","# imports
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from cpmpy import *
+import random
+import itertools
+from itertools import permutations
+from pathlib import Path
+import ast
+# configurations
+random.seed(1)
+duration = []
+preference = []
+maximum_release_time = 5
+# utility functions
+def get_jobs():
+    # data input, each job have several operations and each operation can be processed by one of the alternative machines.
+    return ast.literal_eval(Path('source.txt').read_text())
+def get_job_count(jobs):
+    return len(jobs)
+def get_number_of_tasks(jobs, num_jobs):
+    return [len(jobs[i]) for i in range(0, num_jobs)]
+def get_number_of_preferences(jobs, num_tasks, num_jobs):
+    return [[len(jobs[i][j]) for j in range(0, num_tasks[i])] for i in range(0, num_jobs)]
+def get_release_times(num_jobs, maximum_release_time):
+    release_times = []
+    for i in range(0, num_jobs):
+        release_times.append(random.randint(0, maximum_release_time))
+    return release_times
+def get_horizon(jobs, release_times):
+    horizon = 0 # maximum time to process all jobs (use the )
+    for job in jobs:
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            horizon += max_task_duration
+    return (horizon + sum(release_times))
+# data preparation
+jobs = get_jobs()
+num_jobs = get_job_count(jobs)
+num_tasks = get_number_of_tasks(jobs, num_jobs)
+num_preferences = get_number_of_preferences(jobs, num_tasks, num_jobs)
+release_times = get_release_times(num_jobs, maximum_release_time)
+horizon = get_horizon(jobs, release_times)
+# define model
+def model(horizon, num_tasks, num_jobs):
+    starts = [intvar(0, horizon, shape=num_tasks[i], name=f""start_{i}"") for i in range(0, num_jobs)]
+    ends = [intvar(0, horizon, shape=num_tasks[i], name=f""end_{i}"") for i in range(0, num_jobs)]
+    m = Model()
+    return m, (starts, ends)
+# define preference constraints
+def define_preference_constraints(jobs, m):
+    i=0
+    j=0
+    for job in jobs:
+        temp_dur = []
+        temp_st = []
+        temp_en = []
+        temp_pref = []
+        j=0
+        for task in job:
+            min_duration = task[0][0]
+            max_duration = task[0][0]
+            k=0
+            temp_choice = []
+            for choice in task:
+                min_duration = min([min_duration, choice[0]])
+                max_duration = max([max_duration, choice[0]])
+                t_c = boolvar(shape=1, name=f""ch_{i}_{j}_{k}"")
+                temp_choice.append(t_c)
+                k = k + 1
+            dur = intvar(min_duration, max_duration, shape=1, name=f""dur_{i}_{j}"")
+            b = 0
+            c = 0
+            for a in range(0, len(temp_choice)):
+                b = b + temp_choice[a]
+                c = c + temp_choice[a]*task[a][0]
+            m += (b == 1)
+            m += (c == dur)
+            m += (ends[i][j] == starts[i][j] + dur)
+            temp_dur.append(dur)
+            temp_pref.append(temp_choice)
+            j = j + 1
+        duration.append(temp_dur)
+        preference.append(temp_pref)
+        i = i + 1
+    return m
+# define overlapping constraints
+def define_overlapping_constraints(m, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times):
+    for j in range(num_jobs):
+        for t in range(num_tasks[j]):
+            for j2 in range(num_jobs):
+                for t2 in range(num_tasks[j2]):
+                    if (j!= j2):
+                        combinations = list(itertools.product([v for v in range(0, num_preferences[j][t])],
+                                                              [v for v in range(0, num_preferences[j2][t2])]))
+                        for combination in combinations:
+                            a = combination[0]
+                            b = combination[1]
+                            if (jobs[j][t][a][1]==jobs[j2][t2][b][1]):
+                                m += ((preference[j][t][a]*ends[j][t]) <= (preference[j2][t2][b]*starts[j2][t2])) | ((preference[j2][t2][b]*ends[j2][t2]) <= (preference[j][t][a]*starts[j][t]))
+    for i in range(0, num_jobs):
+        for t in range(num_tasks[i] - 1):
+            m += [starts[i][t + 1] >= ends[i][t]]
+    for i in range(0, num_jobs):
+        m += starts[i][0] >= release_times[i]         
+    return m
+# define objective
+def objective(m, ends):
+    m.minimize(max(ends))
+    return m
+# define visualization
+def visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs):
+    df = pd.DataFrame(columns=('Start', 'End', 'Machine', 'Job', 'Name'))
+    for job_id in range(0, num_jobs):
+            for task_id in range(num_tasks[job_id]):
+                for alt_id in range(num_preferences[job_id][task_id]):
+                    if ((preference[job_id][task_id][alt_id]).value()):
+                        machine = jobs[job_id][task_id][alt_id][1]
+                        selected = alt_id
+                df.loc[ len(df) ] = [(starts[job_id][task_id]).value(), (ends[job_id][task_id]).value(),
+                                     machine, f""Job {job_id}"", f""task {job_id} {task_id}""]
+                print(
+                    ""  task_%i_%i starts at %i (alt %i, machine %i, duration %i)""
+                    % (job_id, task_id, (starts[job_id][task_id]).value(), selected, machine,
+                       (duration[job_id][task_id]).value())
+                )
+    df['Time'] = df['End'] - df['Start']  # Length on x-axis
+
+    fig = px.bar(df, orientation='h',
+                 base=""Start"", x=""Time"", y=""Machine"", color=""Job"", text=""Name"")
+    for i in range(len(fig['data'])):
+        fig['data'][i].width = 5
+    fig.show() 
+# solve
+(model, (starts, ends)) = model(horizon, num_tasks, num_jobs)
+model = define_preference_constraints(jobs, model)
+model = define_overlapping_constraints(model, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times)
+model = objective(model, ends)
+sat = model.solve()
+if not sat: raise Exception(""No solution found."")
+
+# output
+print(""Makespan:"", max([b for a in ([e.value() for e in ends]) for b in a]))
+print(""Start times:"", [list(s.value()) for s in starts])
+print(""End times:"", [list(e.value()) for e in ends])
+# visualize
+visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs)",7,13,"
+# imports
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from cpmpy import *
+import random
+import itertools
+from itertools import permutations
+from pathlib import Path
+import ast
+# configurations
+random.seed(1)
+duration = []
+preference = []
+maximum_release_time = 5
+#
+#
+# utility functions
+def get_jobs():
+    # data input, each job have several operations and each operation can be processed by one of the alternative machines.
+    return ast.literal_eval(Path('source.txt').read_text())
+def get_job_count(jobs):
+    return len(jobs)
+def get_number_of_tasks(jobs, num_jobs):
+    return [len(jobs[i]) for i in range(0, num_jobs)]
+def get_number_of_preferences(jobs, num_tasks, num_jobs):
+    return [[len(jobs[i][j]) for j in range(0, num_tasks[i])] for i in range(0, num_jobs)]
+def get_release_times(num_jobs, maximum_release_time):
+    release_times = []
+    for i in range(0, num_jobs):
+        release_times.append(random.randint(0, maximum_release_time))
+    return release_times
+def get_horizon(jobs, release_times):
+    horizon = 0 # maximum time to process all jobs (use the )
+    for job in jobs:
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            horizon += max_task_duration
+    return (horizon + sum(release_times))
+#
+# data preparation
+jobs = get_jobs()
+num_jobs = get_job_count(jobs)
+num_tasks = get_number_of_tasks(jobs, num_jobs)
+num_preferences = get_number_of_preferences(jobs, num_tasks, num_jobs)
+release_times = get_release_times(num_jobs, maximum_release_time)
+horizon = get_horizon(jobs, release_times)
+# define model
+def model(horizon, num_tasks, num_jobs):
+    starts = [intvar(0, horizon, shape=num_tasks[i], name=f""start_{i}"") for i in range(0, num_jobs)]
+    ends = [intvar(0, horizon, shape=num_tasks[i], name=f""end_{i}"") for i in range(0, num_jobs)]
+    m = Model()
+    return m, (starts, ends)
+# define preference constraints
+def define_preference_constraints(jobs, m):
+    i=0
+    j=0
+    for job in jobs:
+        temp_dur = []
+        temp_st = []
+        temp_en = []
+        temp_pref = []
+        j=0
+        for task in job:
+            min_duration = task[0][0]
+            max_duration = task[0][0]
+            k=0
+            temp_choice = []
+            for choice in task:
+                min_duration = min([min_duration, choice[0]])
+                max_duration = max([max_duration, choice[0]])
+                t_c = boolvar(shape=1, name=f""ch_{i}_{j}_{k}"")
+                temp_choice.append(t_c)
+                k = k + 1
+            dur = intvar(min_duration, max_duration, shape=1, name=f""dur_{i}_{j}"")
+            b = 0
+            c = 0
+            for a in range(0, len(temp_choice)):
+                b = b + temp_choice[a]
+                c = c + temp_choice[a]*task[a][0]
+            m += (b == 1)
+            m += (c == dur)
+            m += (ends[i][j] == starts[i][j] + dur)
+            temp_dur.append(dur)
+            temp_pref.append(temp_choice)
+            j = j + 1
+        duration.append(temp_dur)
+        preference.append(temp_pref)
+        i = i + 1
+    return m
+# define overlapping constraints
+def define_overlapping_constraints(m, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times):
+    for j in range(num_jobs):
+        for t in range(num_tasks[j]):
+            for j2 in range(num_jobs):
+                for t2 in range(num_tasks[j2]):
+                    if (j!= j2):
+                        combinations = list(itertools.product([v for v in range(0, num_preferences[j][t])],
+                                                              [v for v in range(0, num_preferences[j2][t2])]))
+                        for combination in combinations:
+                            a = combination[0]
+                            b = combination[1]
+                            if (jobs[j][t][a][1]==jobs[j2][t2][b][1]):
+                                m += ((preference[j][t][a]*ends[j][t]) <= (preference[j2][t2][b]*starts[j2][t2])) | ((preference[j2][t2][b]*ends[j2][t2]) <= (preference[j][t][a]*starts[j][t]))
+    for i in range(0, num_jobs):
+        for t in range(num_tasks[i] - 1):
+            m += [starts[i][t + 1] >= ends[i][t]]
+    for i in range(0, num_jobs):
+        m += starts[i][0] >= release_times[i]         
+    return m
+#
+#
+#
+# define objective
+def objective(m, ends):
+    m.minimize(max(ends))
+    return m
+# define visualization
+def visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs):
+    df = pd.DataFrame(columns=('Start', 'End', 'Machine', 'Job', 'Name'))
+    for job_id in range(0, num_jobs):
+            for task_id in range(num_tasks[job_id]):
+                for alt_id in range(num_preferences[job_id][task_id]):
+                    if ((preference[job_id][task_id][alt_id]).value()):
+                        machine = jobs[job_id][task_id][alt_id][1]
+                        selected = alt_id
+                df.loc[ len(df) ] = [(starts[job_id][task_id]).value(), (ends[job_id][task_id]).value(),
+                                     machine, f""Job {job_id}"", f""task {job_id} {task_id}""]
+                print(
+                    ""  task_%i_%i starts at %i (alt %i, machine %i, duration %i)""
+                    % (job_id, task_id, (starts[job_id][task_id]).value(), selected, machine,
+                       (duration[job_id][task_id]).value())
+                )
+    df['Time'] = df['End'] - df['Start']  # Length on x-axis
+
+    fig = px.bar(df, orientation='h',
+                 base=""Start"", x=""Time"", y=""Machine"", color=""Job"", text=""Name"")
+    for i in range(len(fig['data'])):
+        fig['data'][i].width = 5
+    fig.show() 
+# solve
+(model, (starts, ends)) = model(horizon, num_tasks, num_jobs)
+model = define_preference_constraints(jobs, model)
+model = define_overlapping_constraints(model, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times)
+model = objective(model, ends)
+sat = model.solve()
+if not sat: raise Exception(""No solution found."")
+
+# output
+print(""Makespan:"", max([b for a in ([e.value() for e in ends]) for b in a]))
+print(""Start times:"", [list(s.value()) for s in starts])
+print(""End times:"", [list(e.value()) for e in ends])
+# visualize
+visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs)"
+"We need to create a schedule for Shiny Factory with the primary objective of minimizing maximum tardiness. The job details are in source.txt. The challenge is that due dates are calculated based on the total processing time of each job, multiplied by a due date allowance factor of 1.3, and the jobs have random release times. Once this is resolved, ensure the solutions are thoroughly documented and visually presented for a comprehensive evaluation.","# imports
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from cpmpy import *
+import random
+import itertools
+from itertools import permutations
+from pathlib import Path
+import ast
+# configurations
+random.seed(1)
+duration = []
+preference = []
+maximum_release_time = 5
+due_date_allowance = 1.3
+# utility functions
+def get_jobs():
+    # data input, each job have several operations and each operation can be processed by one of the alternative machines.
+    return ast.literal_eval(Path('source.txt').read_text())
+def get_job_count(jobs):
+    return len(jobs)
+def get_number_of_tasks(jobs, num_jobs):
+    return [len(jobs[i]) for i in range(0, num_jobs)]
+def get_number_of_preferences(jobs, num_tasks, num_jobs):
+    return [[len(jobs[i][j]) for j in range(0, num_tasks[i])] for i in range(0, num_jobs)]
+def get_due_dates(due_date_allowance, maximum_durations):
+    return (0 + due_date_allowance*np.asarray(maximum_durations)).astype(int).tolist()
+def get_release_times(num_jobs, maximum_release_time):
+    release_times = []
+    for i in range(0, num_jobs):
+        release_times.append(random.randint(0, maximum_release_time))
+    return release_times
+def get_horizon(jobs, release_times):
+    horizon = 0 # maximum time to process all jobs (use the )
+    for job in jobs:
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            horizon += max_task_duration
+    return (horizon + sum(release_times))
+# tardiness related utility functions
+def get_maximum_durations(jobs):
+    maximum_durations = []
+    for job in jobs:
+        maximum_duration_per_job = []
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            maximum_duration_per_job.append(max_task_duration)
+        maximum_durations.append(np.sum(maximum_duration_per_job))   
+    return maximum_durations
+# data preparation
+jobs = get_jobs()
+num_jobs = get_job_count(jobs)
+num_tasks = get_number_of_tasks(jobs, num_jobs)
+num_preferences = get_number_of_preferences(jobs, num_tasks, num_jobs)
+maximum_durations = get_maximum_durations(jobs)
+due_dates = get_due_dates(due_date_allowance, maximum_durations)
+release_times = get_release_times(num_jobs, maximum_release_time)
+horizon = get_horizon(jobs, release_times)
+# define model
+def get_model(horizon, num_tasks, num_jobs):
+    starts = [intvar(0, horizon, shape=num_tasks[i], name=f""start_{i}"") for i in range(0, num_jobs)]
+    ends = [intvar(0, horizon, shape=num_tasks[i], name=f""end_{i}"") for i in range(0, num_jobs)]
+    tardiness = intvar(0, horizon, shape=(num_jobs), name=""tardiness"")
+    m = Model()
+    return m, (starts, ends, tardiness)
+# define constraints
+def define_preference_constraints(jobs, m):
+    i=0
+    j=0
+    for job in jobs:
+        temp_dur = []
+        temp_st = []
+        temp_en = []
+        temp_pref = []
+        j=0
+        for task in job:
+            min_duration = task[0][0]
+            max_duration = task[0][0]
+            k=0
+            temp_choice = []
+            for choice in task:
+                min_duration = min([min_duration, choice[0]])
+                max_duration = max([max_duration, choice[0]])
+                t_c = boolvar(shape=1, name=f""ch_{i}_{j}_{k}"")
+                temp_choice.append(t_c)
+                k = k + 1
+            dur = intvar(min_duration, max_duration, shape=1, name=f""dur_{i}_{j}"")
+            b = 0
+            c = 0
+            for a in range(0, len(temp_choice)):
+                b = b + temp_choice[a]
+                c = c + temp_choice[a]*task[a][0]
+            m += (b == 1)
+            m += (c == dur)
+            m += (ends[i][j] == starts[i][j] + dur)
+            temp_dur.append(dur)
+            temp_pref.append(temp_choice)
+            j = j + 1
+        duration.append(temp_dur)
+        preference.append(temp_pref)
+        i = i + 1
+    return m
+def define_overlapping_constraints(m, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times):
+    for j in range(num_jobs):
+        for t in range(num_tasks[j]):
+            for j2 in range(num_jobs):
+                for t2 in range(num_tasks[j2]):
+                    if (j!= j2):
+                        combinations = list(itertools.product([v for v in range(0, num_preferences[j][t])],
+                                                              [v for v in range(0, num_preferences[j2][t2])]))
+                        for combination in combinations:
+                            a = combination[0]
+                            b = combination[1]
+                            if (jobs[j][t][a][1]==jobs[j2][t2][b][1]):
+                                m += ((preference[j][t][a]*ends[j][t]) <= (preference[j2][t2][b]*starts[j2][t2])) | ((preference[j2][t2][b]*ends[j2][t2]) <= (preference[j][t][a]*starts[j][t]))
+    for i in range(0, num_jobs):
+        for t in range(num_tasks[i] - 1):
+            m += [starts[i][t + 1] >= ends[i][t]]
+    for i in range(0, num_jobs):
+        m += starts[i][0] >= release_times[i]
+    return m
+def tardiness_constraints(m, num_jobs, tardiness, due_dates):
+    for j in range(num_jobs):
+        m += (tardiness[j] == max([ends[j][(num_tasks[j] -1)] - due_dates[j], 0]))
+    return m
+# define objective
+def objective(m, tardiness):
+    m.minimize(max(tardiness))
+    return m
+# define visualization
+def visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs):
+    df = pd.DataFrame(columns=('Start', 'End', 'Machine', 'Job', 'Name'))
+    for job_id in range(0, num_jobs):
+            for task_id in range(num_tasks[job_id]):
+                for alt_id in range(num_preferences[job_id][task_id]):
+                    if ((preference[job_id][task_id][alt_id]).value()):
+                        machine = jobs[job_id][task_id][alt_id][1]
+                        selected = alt_id
+                df.loc[ len(df) ] = [(starts[job_id][task_id]).value(), (ends[job_id][task_id]).value(),
+                                     machine, f""Job {job_id}"", f""task {job_id} {task_id}""]
+                print(
+                    ""  task_%i_%i starts at %i (alt %i, machine %i, duration %i)""
+                    % (job_id, task_id, (starts[job_id][task_id]).value(), selected, machine,
+                       (duration[job_id][task_id]).value())
+                )
+    df['Time'] = df['End'] - df['Start']  # Length on x-axis
+
+    fig = px.bar(df, orientation='h',
+                 base=""Start"", x=""Time"", y=""Machine"", color=""Job"", text=""Name"")
+    for i in range(len(fig['data'])):
+        fig['data'][i].width = 5
+    fig.show() 
+# solve
+(model, (starts, ends, tardiness)) = get_model(horizon, num_tasks, num_jobs)
+model = define_preference_constraints(jobs, model)
+model = define_overlapping_constraints(model, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times)
+model = tardiness_constraints(model, num_jobs, tardiness, due_dates)
+model = objective(model, tardiness)
+sat = model.solve()
+if not sat: raise Exception(""No solution found."")
+
+# output
+print(""Max Tardiness:"", max(tardiness.value()))
+print(""Start times:"", [list(s.value()) for s in starts])
+print(""End times:"", [list(e.value()) for e in ends])
+# visualize
+visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs)",4,24,"
+# imports
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from cpmpy import *
+import random
+import itertools
+from itertools import permutations
+from pathlib import Path
+import ast
+# configurations
+random.seed(1)
+duration = []
+preference = []
+maximum_release_time = 5
+due_date_allowance = 1.3
+#
+#
+# utility functions
+def get_jobs():
+    # data input, each job have several operations and each operation can be processed by one of the alternative machines.
+    return ast.literal_eval(Path('source.txt').read_text())
+def get_job_count(jobs):
+    return len(jobs)
+def get_number_of_tasks(jobs, num_jobs):
+    return [len(jobs[i]) for i in range(0, num_jobs)]
+def get_number_of_preferences(jobs, num_tasks, num_jobs):
+    return [[len(jobs[i][j]) for j in range(0, num_tasks[i])] for i in range(0, num_jobs)]
+def get_due_dates(due_date_allowance, maximum_durations):
+    return (0 + due_date_allowance*np.asarray(maximum_durations)).astype(int).tolist()
+def get_release_times(num_jobs, maximum_release_time):
+    release_times = []
+    for i in range(0, num_jobs):
+        release_times.append(random.randint(0, maximum_release_time))
+    return release_times
+def get_horizon(jobs, release_times):
+    horizon = 0 # maximum time to process all jobs (use the )
+    for job in jobs:
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            horizon += max_task_duration
+    return (horizon + sum(release_times))
+# tardiness related utility functions
+def get_maximum_durations(jobs):
+    maximum_durations = []
+    for job in jobs:
+        maximum_duration_per_job = []
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            maximum_duration_per_job.append(max_task_duration)
+        maximum_durations.append(np.sum(maximum_duration_per_job))   
+    return maximum_durations
+# data preparation
+jobs = get_jobs()
+num_jobs = get_job_count(jobs)
+num_tasks = get_number_of_tasks(jobs, num_jobs)
+num_preferences = get_number_of_preferences(jobs, num_tasks, num_jobs)
+maximum_durations = get_maximum_durations(jobs)
+due_dates = get_due_dates(due_date_allowance, maximum_durations)
+release_times = get_release_times(num_jobs, maximum_release_time)
+horizon = get_horizon(jobs, release_times)
+# define model
+def get_model(horizon, num_tasks, num_jobs):
+    starts = [intvar(0, horizon, shape=num_tasks[i], name=f""start_{i}"") for i in range(0, num_jobs)]
+    ends = [intvar(0, horizon, shape=num_tasks[i], name=f""end_{i}"") for i in range(0, num_jobs)]
+    tardiness = intvar(0, horizon, shape=(num_jobs), name=""tardiness"")
+    m = Model()
+    return m, (starts, ends, tardiness)
+# define constraints
+def define_preference_constraints(jobs, m):
+    i=0
+    j=0
+    for job in jobs:
+        temp_dur = []
+        temp_st = []
+        temp_en = []
+        temp_pref = []
+        j=0
+        for task in job:
+            min_duration = task[0][0]
+            max_duration = task[0][0]
+            k=0
+            temp_choice = []
+            for choice in task:
+                min_duration = min([min_duration, choice[0]])
+                max_duration = max([max_duration, choice[0]])
+                t_c = boolvar(shape=1, name=f""ch_{i}_{j}_{k}"")
+                temp_choice.append(t_c)
+                k = k + 1
+            dur = intvar(min_duration, max_duration, shape=1, name=f""dur_{i}_{j}"")
+            b = 0
+            c = 0
+            for a in range(0, len(temp_choice)):
+                b = b + temp_choice[a]
+                c = c + temp_choice[a]*task[a][0]
+            m += (b == 1)
+            m += (c == dur)
+            m += (ends[i][j] == starts[i][j] + dur)
+            temp_dur.append(dur)
+            temp_pref.append(temp_choice)
+            j = j + 1
+        duration.append(temp_dur)
+        preference.append(temp_pref)
+        i = i + 1
+    return m
+def define_overlapping_constraints(m, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times):
+    for j in range(num_jobs):
+        for t in range(num_tasks[j]):
+            for j2 in range(num_jobs):
+                for t2 in range(num_tasks[j2]):
+                    if (j!= j2):
+                        combinations = list(itertools.product([v for v in range(0, num_preferences[j][t])],
+                                                              [v for v in range(0, num_preferences[j2][t2])]))
+                        for combination in combinations:
+                            a = combination[0]
+                            b = combination[1]
+                            if (jobs[j][t][a][1]==jobs[j2][t2][b][1]):
+                                m += ((preference[j][t][a]*ends[j][t]) <= (preference[j2][t2][b]*starts[j2][t2])) | ((preference[j2][t2][b]*ends[j2][t2]) <= (preference[j][t][a]*starts[j][t]))
+    for i in range(0, num_jobs):
+        for t in range(num_tasks[i] - 1):
+            m += [starts[i][t + 1] >= ends[i][t]]
+    for i in range(0, num_jobs):
+        m += starts[i][0] >= release_times[i]
+    return m
+#
+#
+def tardiness_constraints(m, num_jobs, tardiness, due_dates):
+    for j in range(num_jobs):
+        m += (tardiness[j] == max([ends[j][(num_tasks[j] -1)] - due_dates[j], 0]))
+    return m
+# define objective
+def objective(m, tardiness):
+    m.minimize(max(tardiness))
+    return m
+# define visualization
+def visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs):
+    df = pd.DataFrame(columns=('Start', 'End', 'Machine', 'Job', 'Name'))
+    for job_id in range(0, num_jobs):
+            for task_id in range(num_tasks[job_id]):
+                for alt_id in range(num_preferences[job_id][task_id]):
+                    if ((preference[job_id][task_id][alt_id]).value()):
+                        machine = jobs[job_id][task_id][alt_id][1]
+                        selected = alt_id
+                df.loc[ len(df) ] = [(starts[job_id][task_id]).value(), (ends[job_id][task_id]).value(),
+                                     machine, f""Job {job_id}"", f""task {job_id} {task_id}""]
+                print(
+                    ""  task_%i_%i starts at %i (alt %i, machine %i, duration %i)""
+                    % (job_id, task_id, (starts[job_id][task_id]).value(), selected, machine,
+                       (duration[job_id][task_id]).value())
+                )
+    df['Time'] = df['End'] - df['Start']  # Length on x-axis
+
+    fig = px.bar(df, orientation='h',
+                 base=""Start"", x=""Time"", y=""Machine"", color=""Job"", text=""Name"")
+    for i in range(len(fig['data'])):
+        fig['data'][i].width = 5
+    fig.show() 
+# solve
+(model, (starts, ends, tardiness)) = get_model(horizon, num_tasks, num_jobs)
+model = define_preference_constraints(jobs, model)
+model = define_overlapping_constraints(model, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times)
+model = tardiness_constraints(model, num_jobs, tardiness, due_dates)
+model = objective(model, tardiness)
+sat = model.solve()
+if not sat: raise Exception(""No solution found."")
+
+# output
+print(""Max Tardiness:"", max(tardiness.value()))
+print(""Start times:"", [list(s.value()) for s in starts])
+print(""End times:"", [list(e.value()) for e in ends])
+# visualize
+visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs)"
+"I'm seeking assistance in developing schedule for Shiny Printing Factory with makespan as the primary objective function. The job information is contained in the source.txt file. Once the problem has been successfully addressed, could you please arrange for the solutions to be printed and visually presented?","# imports
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from cpmpy import *
+import random
+import itertools
+from itertools import permutations
+from pathlib import Path
+import ast
+# configurations
+random.seed(1)
+duration = []
+preference = []
+# utility functions
+def get_jobs():
+    # data input, each job have several operations and each operation can be processed by one of the alternative machines.
+    return ast.literal_eval(Path('source.txt').read_text())
+def get_job_count(jobs):
+    return len(jobs)
+def get_number_of_tasks(jobs, num_jobs):
+    return [len(jobs[i]) for i in range(0, num_jobs)]
+def get_number_of_preferences(jobs, num_tasks, num_jobs):
+    return [[len(jobs[i][j]) for j in range(0, num_tasks[i])] for i in range(0, num_jobs)]
+def get_horizon(jobs):
+    horizon = 0 # maximum time to process all jobs (use the )
+    for job in jobs:
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            horizon += max_task_duration
+    return horizon
+# data preparation
+jobs = get_jobs()
+num_jobs = get_job_count(jobs)
+num_tasks = get_number_of_tasks(jobs, num_jobs)
+num_preferences = get_number_of_preferences(jobs, num_tasks, num_jobs)
+horizon = get_horizon(jobs)
+# define model
+def model(horizon, num_tasks, num_jobs):
+    starts = [intvar(0, horizon, shape=num_tasks[i], name=f""start_{i}"") for i in range(0, num_jobs)]
+    ends = [intvar(0, horizon, shape=num_tasks[i], name=f""end_{i}"") for i in range(0, num_jobs)]
+    m = Model()
+    return m, (starts, ends)
+# define constraints
+def define_preference_constraints(jobs, m):
+    i=0
+    j=0
+    for job in jobs:
+        temp_dur = []
+        temp_st = []
+        temp_en = []
+        temp_pref = []
+        j=0
+        for task in job:
+            min_duration = task[0][0]
+            max_duration = task[0][0]
+            k=0
+            temp_choice = []
+            for choice in task:
+                min_duration = min([min_duration, choice[0]])
+                max_duration = max([max_duration, choice[0]])
+                t_c = boolvar(shape=1, name=f""ch_{i}_{j}_{k}"")
+                temp_choice.append(t_c)
+                k = k + 1
+            dur = intvar(min_duration, max_duration, shape=1, name=f""dur_{i}_{j}"")
+            b = 0
+            c = 0
+            for a in range(0, len(temp_choice)):
+                b = b + temp_choice[a]
+                c = c + temp_choice[a]*task[a][0]
+            m += (b == 1)
+            m += (c == dur)
+            m += (ends[i][j] == starts[i][j] + dur)
+            temp_dur.append(dur)
+            temp_pref.append(temp_choice)
+            j = j + 1
+        duration.append(temp_dur)
+        preference.append(temp_pref)
+        i = i + 1
+    return m
+def define_overlapping_constraints(m, jobs, num_jobs, num_tasks, num_preferences, starts, ends):
+    for j in range(num_jobs):
+        for t in range(num_tasks[j]):
+            for j2 in range(num_jobs):
+                for t2 in range(num_tasks[j2]):
+                    if (j!= j2):
+                        combinations = list(itertools.product([v for v in range(0, num_preferences[j][t])],
+                                                              [v for v in range(0, num_preferences[j2][t2])]))
+                        for combination in combinations:
+                            a = combination[0]
+                            b = combination[1]
+                            if (jobs[j][t][a][1]==jobs[j2][t2][b][1]):
+                                m += ((preference[j][t][a]*ends[j][t]) <= (preference[j2][t2][b]*starts[j2][t2])) | ((preference[j2][t2][b]*ends[j2][t2]) <= (preference[j][t][a]*starts[j][t]))
+    for i in range(0, num_jobs):
+        for t in range(num_tasks[i] - 1):
+            m += [starts[i][t + 1] >= ends[i][t]]
+    return m
+# define objective
+def objective(m, ends):
+    m.minimize(max(ends))
+    return m
+# define visualization
+def visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs):
+    df = pd.DataFrame(columns=('Start', 'End', 'Machine', 'Job', 'Name'))
+    for job_id in range(0, num_jobs):
+            for task_id in range(num_tasks[job_id]):
+                for alt_id in range(num_preferences[job_id][task_id]):
+                    if ((preference[job_id][task_id][alt_id]).value()):
+                        machine = jobs[job_id][task_id][alt_id][1]
+                        selected = alt_id
+                df.loc[ len(df) ] = [(starts[job_id][task_id]).value(), (ends[job_id][task_id]).value(),
+                                     machine, f""Job {job_id}"", f""task {job_id} {task_id}""]
+                print(
+                    ""  task_%i_%i starts at %i (alt %i, machine %i, duration %i)""
+                    % (job_id, task_id, (starts[job_id][task_id]).value(), selected, machine,
+                       (duration[job_id][task_id]).value())
+                )
+    df['Time'] = df['End'] - df['Start']  # Length on x-axis
+
+    fig = px.bar(df, orientation='h',
+                 base=""Start"", x=""Time"", y=""Machine"", color=""Job"", text=""Name"")
+    for i in range(len(fig['data'])):
+        fig['data'][i].width = 5
+    fig.show() 
+# solve
+(model, (starts, ends)) = model(horizon, num_tasks, num_jobs)
+model = define_preference_constraints(jobs, model)
+model = define_overlapping_constraints(model, jobs, num_jobs, num_tasks, num_preferences, starts, ends)
+model = objective(model, ends)
+sat = model.solve()
+if not sat: raise Exception(""No solution found."")
+
+# output
+print(""Makespan:"", max([b for a in ([e.value() for e in ends]) for b in a]))
+print(""Start times:"", [list(s.value()) for s in starts])
+print(""End times:"", [list(e.value()) for e in ends])
+# visualize
+visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs)",6,1,"
+# imports
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from cpmpy import *
+import random
+import itertools
+from itertools import permutations
+from pathlib import Path
+import ast
+# configurations
+random.seed(1)
+duration = []
+preference = []
+#
+#
+# utility functions
+def get_jobs():
+    # data input, each job have several operations and each operation can be processed by one of the alternative machines.
+    return ast.literal_eval(Path('source.txt').read_text())
+def get_job_count(jobs):
+    return len(jobs)
+def get_number_of_tasks(jobs, num_jobs):
+    return [len(jobs[i]) for i in range(0, num_jobs)]
+def get_number_of_preferences(jobs, num_tasks, num_jobs):
+    return [[len(jobs[i][j]) for j in range(0, num_tasks[i])] for i in range(0, num_jobs)]
+def get_horizon(jobs):
+    horizon = 0 # maximum time to process all jobs (use the )
+    for job in jobs:
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            horizon += max_task_duration
+    return horizon
+#
+# data preparation
+jobs = get_jobs()
+num_jobs = get_job_count(jobs)
+num_tasks = get_number_of_tasks(jobs, num_jobs)
+num_preferences = get_number_of_preferences(jobs, num_tasks, num_jobs)
+horizon = get_horizon(jobs)
+# define model
+def model(horizon, num_tasks, num_jobs):
+    starts = [intvar(0, horizon, shape=num_tasks[i], name=f""start_{i}"") for i in range(0, num_jobs)]
+    ends = [intvar(0, horizon, shape=num_tasks[i], name=f""end_{i}"") for i in range(0, num_jobs)]
+    m = Model()
+    return m, (starts, ends)
+# define constraints
+def define_preference_constraints(jobs, m):
+    i=0
+    j=0
+    for job in jobs:
+        temp_dur = []
+        temp_st = []
+        temp_en = []
+        temp_pref = []
+        j=0
+        for task in job:
+            min_duration = task[0][0]
+            max_duration = task[0][0]
+            k=0
+            temp_choice = []
+            for choice in task:
+                min_duration = min([min_duration, choice[0]])
+                max_duration = max([max_duration, choice[0]])
+                t_c = boolvar(shape=1, name=f""ch_{i}_{j}_{k}"")
+                temp_choice.append(t_c)
+                k = k + 1
+            dur = intvar(min_duration, max_duration, shape=1, name=f""dur_{i}_{j}"")
+            b = 0
+            c = 0
+            for a in range(0, len(temp_choice)):
+                b = b + temp_choice[a]
+                c = c + temp_choice[a]*task[a][0]
+            m += (b == 1)
+            m += (c == dur)
+            m += (ends[i][j] == starts[i][j] + dur)
+            temp_dur.append(dur)
+            temp_pref.append(temp_choice)
+            j = j + 1
+        duration.append(temp_dur)
+        preference.append(temp_pref)
+        i = i + 1
+    return m
+def define_overlapping_constraints(m, jobs, num_jobs, num_tasks, num_preferences, starts, ends):
+    for j in range(num_jobs):
+        for t in range(num_tasks[j]):
+            for j2 in range(num_jobs):
+                for t2 in range(num_tasks[j2]):
+                    if (j!= j2):
+                        combinations = list(itertools.product([v for v in range(0, num_preferences[j][t])],
+                                                              [v for v in range(0, num_preferences[j2][t2])]))
+                        for combination in combinations:
+                            a = combination[0]
+                            b = combination[1]
+                            if (jobs[j][t][a][1]==jobs[j2][t2][b][1]):
+                                m += ((preference[j][t][a]*ends[j][t]) <= (preference[j2][t2][b]*starts[j2][t2])) | ((preference[j2][t2][b]*ends[j2][t2]) <= (preference[j][t][a]*starts[j][t]))
+    for i in range(0, num_jobs):
+        for t in range(num_tasks[i] - 1):
+            m += [starts[i][t + 1] >= ends[i][t]]
+    return m
+#
+#
+#
+# define objective
+def objective(m, ends):
+    m.minimize(max(ends))
+    return m
+# define visualization
+def visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs):
+    df = pd.DataFrame(columns=('Start', 'End', 'Machine', 'Job', 'Name'))
+    for job_id in range(0, num_jobs):
+            for task_id in range(num_tasks[job_id]):
+                for alt_id in range(num_preferences[job_id][task_id]):
+                    if ((preference[job_id][task_id][alt_id]).value()):
+                        machine = jobs[job_id][task_id][alt_id][1]
+                        selected = alt_id
+                df.loc[ len(df) ] = [(starts[job_id][task_id]).value(), (ends[job_id][task_id]).value(),
+                                     machine, f""Job {job_id}"", f""task {job_id} {task_id}""]
+                print(
+                    ""  task_%i_%i starts at %i (alt %i, machine %i, duration %i)""
+                    % (job_id, task_id, (starts[job_id][task_id]).value(), selected, machine,
+                       (duration[job_id][task_id]).value())
+                )
+    df['Time'] = df['End'] - df['Start']  # Length on x-axis
+
+    fig = px.bar(df, orientation='h',
+                 base=""Start"", x=""Time"", y=""Machine"", color=""Job"", text=""Name"")
+    for i in range(len(fig['data'])):
+        fig['data'][i].width = 5
+    fig.show() 
+# solve
+(model, (starts, ends)) = model(horizon, num_tasks, num_jobs)
+model = define_preference_constraints(jobs, model)
+model = define_overlapping_constraints(model, jobs, num_jobs, num_tasks, num_preferences, starts, ends)
+model = objective(model, ends)
+sat = model.solve()
+if not sat: raise Exception(""No solution found."")
+
+# output
+print(""Makespan:"", max([b for a in ([e.value() for e in ends]) for b in a]))
+print(""Start times:"", [list(s.value()) for s in starts])
+print(""End times:"", [list(e.value()) for e in ends])
+# visualize
+visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs)"
+"Our goal is to create a schedule for Shiny Factory to minimize the makespan. The job details can be found in source_machine_13.txt. An added complexity is that each job has a random release time. Furthermore, we have a special condition for the 7-Head Machine: if its waiting time exceeds three units, we need to consider using a different machine. After solving the scheduling problem, we must print and visualize the solutions for comprehensive analysis.","# imports
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from cpmpy import *
+import random
+import itertools
+from itertools import permutations
+from pathlib import Path
+import ast
+# configurations
+random.seed(1)
+duration = []
+preference = []
+maximum_release_time = 5
+machines = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,
+            20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,37,38,39,40,41,42,43,44]
+# utility functions
+def get_jobs():
+    # data input, each job have several operations and each operation can be processed by one of the alternative machines.
+    return ast.literal_eval(Path('source_machine_13.txt').read_text())
+def get_job_count(jobs):
+    return len(jobs)
+def get_number_of_tasks(jobs, num_jobs):
+    return [len(jobs[i]) for i in range(0, num_jobs)]
+def get_number_of_preferences(jobs, num_tasks, num_jobs):
+    return [[len(jobs[i][j]) for j in range(0, num_tasks[i])] for i in range(0, num_jobs)]
+def get_release_times(num_jobs, maximum_release_time):
+    release_times = []
+    for i in range(0, num_jobs):
+        release_times.append(random.randint(0, maximum_release_time))
+    return release_times
+def get_horizon(jobs, release_times):
+    horizon = 0 # maximum time to process all jobs (use the )
+    for job in jobs:
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            horizon += max_task_duration
+    return (horizon + sum(release_times))
+# waiting time related utility functions
+def special_adjustment_for_machine_13(jobs, num_jobs, machines):
+    for i in range(0, num_jobs):
+        for j in range(0, 1):
+            for k in range(0,len(jobs[i][j])):
+                if jobs[i][j][k][1]==13:
+                    for machine in machines:
+                        if machine != 13:
+                            jobs[i][j].append((jobs[i][j][k][0], machine))
+    return jobs
+# data preparation
+jobs = get_jobs()
+num_jobs = get_job_count(jobs)
+jobs = special_adjustment_for_machine_13(jobs, num_jobs, machines)
+num_tasks = get_number_of_tasks(jobs, num_jobs)
+num_preferences = get_number_of_preferences(jobs, num_tasks, num_jobs)
+release_times = get_release_times(num_jobs, maximum_release_time)
+horizon = get_horizon(jobs, release_times)
+# define model
+def model(horizon, num_tasks, num_jobs):
+    starts = [intvar(0, horizon, shape=num_tasks[i], name=f""start_{i}"") for i in range(0, num_jobs)]
+    ends = [intvar(0, horizon, shape=num_tasks[i], name=f""end_{i}"") for i in range(0, num_jobs)]
+    m = Model()
+    return m, (starts, ends)
+# define preference constraints
+def define_preference_constraints(jobs, m):
+    i=0
+    j=0
+    for job in jobs:
+        temp_dur = []
+        temp_st = []
+        temp_en = []
+        temp_pref = []
+        j=0
+        for task in job:
+            min_duration = task[0][0]
+            max_duration = task[0][0]
+            k=0
+            temp_choice = []
+            for choice in task:
+                min_duration = min([min_duration, choice[0]])
+                max_duration = max([max_duration, choice[0]])
+                t_c = boolvar(shape=1, name=f""ch_{i}_{j}_{k}"")
+                temp_choice.append(t_c)
+                k = k + 1
+            dur = intvar(min_duration, max_duration, shape=1, name=f""dur_{i}_{j}"")
+            b = 0
+            c = 0
+            for a in range(0, len(temp_choice)):
+                b = b + temp_choice[a]
+                c = c + temp_choice[a]*task[a][0]
+            m += (b == 1)
+            m += (c == dur)
+            m += (ends[i][j] == starts[i][j] + dur)
+            temp_dur.append(dur)
+            temp_pref.append(temp_choice)
+            j = j + 1
+        duration.append(temp_dur)
+        preference.append(temp_pref)
+        i = i + 1
+    return m
+# define overlapping constraints
+def define_overlapping_constraints(m, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times):
+    for j in range(num_jobs):
+        for t in range(num_tasks[j]):
+            for j2 in range(num_jobs):
+                for t2 in range(num_tasks[j2]):
+                    if (j!= j2):
+                        combinations = list(itertools.product([v for v in range(0, num_preferences[j][t])],
+                                                              [v for v in range(0, num_preferences[j2][t2])]))
+                        for combination in combinations:
+                            a = combination[0]
+                            b = combination[1]
+                            if (jobs[j][t][a][1]==jobs[j2][t2][b][1]):
+                                m += ((preference[j][t][a]*ends[j][t]) <= (preference[j2][t2][b]*starts[j2][t2])) | ((preference[j2][t2][b]*ends[j2][t2]) <= (preference[j][t][a]*starts[j][t]))
+    for i in range(0, num_jobs):
+        for t in range(num_tasks[i] - 1):
+            m += [starts[i][t + 1] >= ends[i][t]]
+    for i in range(0, num_jobs):
+        m += starts[i][0] >= release_times[i]
+    return m
+# define waiting time constraints
+def define_waiting_time_constraints(m, num_jobs, num_preferences, jobs, starts, release_times):
+    for i in range(0, num_jobs):
+        for j in range(0, 1):
+            for k in range(0,num_preferences[i][j]):
+                if jobs[i][j][k][1]==13:
+                    m += ((preference[i][j][k]*starts[i][j]) - (preference[i][j][k]*release_times[i]) <= 3)         
+    return m
+# define objective
+def objective(m, ends):
+    m.minimize(max(ends))
+    return m
+# define visualization
+def visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs):
+    df = pd.DataFrame(columns=('Start', 'End', 'Machine', 'Job', 'Name'))
+    for job_id in range(0, num_jobs):
+            for task_id in range(num_tasks[job_id]):
+                for alt_id in range(num_preferences[job_id][task_id]):
+                    if ((preference[job_id][task_id][alt_id]).value()):
+                        machine = jobs[job_id][task_id][alt_id][1]
+                        selected = alt_id
+                df.loc[ len(df) ] = [(starts[job_id][task_id]).value(), (ends[job_id][task_id]).value(),
+                                     machine, f""Job {job_id}"", f""task {job_id} {task_id}""]
+                print(
+                    ""  task_%i_%i starts at %i (alt %i, machine %i, duration %i)""
+                    % (job_id, task_id, (starts[job_id][task_id]).value(), selected, machine,
+                       (duration[job_id][task_id]).value())
+                )
+    df['Time'] = df['End'] - df['Start']  # Length on x-axis
+
+    fig = px.bar(df, orientation='h',
+                 base=""Start"", x=""Time"", y=""Machine"", color=""Job"", text=""Name"")
+    for i in range(len(fig['data'])):
+        fig['data'][i].width = 5
+    fig.show() 
+# solve
+(model, (starts, ends)) = model(horizon, num_tasks, num_jobs)
+model = define_preference_constraints(jobs, model)
+model = define_overlapping_constraints(model, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times)
+model = define_waiting_time_constraints(model, num_jobs, num_preferences, jobs, starts, release_times)
+model = objective(model, ends)
+sat = model.solve()
+if not sat: raise Exception(""No solution found."")
+
+# output
+print(""Makespan:"", max([b for a in ([e.value() for e in ends]) for b in a]))
+print(""Start times:"", [list(s.value()) for s in starts])
+print(""End times:"", [list(e.value()) for e in ends])
+# visualize
+visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs)",7,25,"
+# imports
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from cpmpy import *
+import random
+import itertools
+from itertools import permutations
+from pathlib import Path
+import ast
+# configurations
+random.seed(1)
+duration = []
+preference = []
+maximum_release_time = 5
+machines = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,
+            20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,37,38,39,40,41,42,43,44]
+# waiting time related utility functions
+def special_adjustment_for_machine_13(jobs, num_jobs, machines):
+    for i in range(0, num_jobs):
+        for j in range(0, 1):
+            for k in range(0,len(jobs[i][j])):
+                if jobs[i][j][k][1]==13:
+                    for machine in machines:
+                        if machine!= 13:
+                            jobs[i][j].append((jobs[i][j][k][0], machine))
+    return jobs
+#
+# utility functions
+def get_jobs():
+    # data input, each job have several operations and each operation can be processed by one of the alternative machines.
+    return ast.literal_eval(Path('source_machine_13.txt').read_text())
+def get_job_count(jobs):
+    return len(jobs)
+def get_number_of_tasks(jobs, num_jobs):
+    return [len(jobs[i]) for i in range(0, num_jobs)]
+def get_number_of_preferences(jobs, num_tasks, num_jobs):
+    return [[len(jobs[i][j]) for j in range(0, num_tasks[i])] for i in range(0, num_jobs)]
+def get_release_times(num_jobs, maximum_release_time):
+    release_times = []
+    for i in range(0, num_jobs):
+        release_times.append(random.randint(0, maximum_release_time))
+    return release_times
+def get_horizon(jobs, release_times):
+    horizon = 0 # maximum time to process all jobs (use the )
+    for job in jobs:
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            horizon += max_task_duration
+    return (horizon + sum(release_times))
+#
+# data preparation
+jobs = get_jobs()
+num_jobs = get_job_count(jobs)
+jobs = special_adjustment_for_machine_13(jobs, num_jobs, machines)
+num_tasks = get_number_of_tasks(jobs, num_jobs)
+num_preferences = get_number_of_preferences(jobs, num_tasks, num_jobs)
+release_times = get_release_times(num_jobs, maximum_release_time)
+horizon = get_horizon(jobs, release_times)
+# define model
+def model(horizon, num_tasks, num_jobs):
+    starts = [intvar(0, horizon, shape=num_tasks[i], name=f""start_{i}"") for i in range(0, num_jobs)]
+    ends = [intvar(0, horizon, shape=num_tasks[i], name=f""end_{i}"") for i in range(0, num_jobs)]
+    m = Model()
+    return m, (starts, ends)
+# define preference constraints
+def define_preference_constraints(jobs, m):
+    i=0
+    j=0
+    for job in jobs:
+        temp_dur = []
+        temp_st = []
+        temp_en = []
+        temp_pref = []
+        j=0
+        for task in job:
+            min_duration = task[0][0]
+            max_duration = task[0][0]
+            k=0
+            temp_choice = []
+            for choice in task:
+                min_duration = min([min_duration, choice[0]])
+                max_duration = max([max_duration, choice[0]])
+                t_c = boolvar(shape=1, name=f""ch_{i}_{j}_{k}"")
+                temp_choice.append(t_c)
+                k = k + 1
+            dur = intvar(min_duration, max_duration, shape=1, name=f""dur_{i}_{j}"")
+            b = 0
+            c = 0
+            for a in range(0, len(temp_choice)):
+                b = b + temp_choice[a]
+                c = c + temp_choice[a]*task[a][0]
+            m += (b == 1)
+            m += (c == dur)
+            m += (ends[i][j] == starts[i][j] + dur)
+            temp_dur.append(dur)
+            temp_pref.append(temp_choice)
+            j = j + 1
+        duration.append(temp_dur)
+        preference.append(temp_pref)
+        i = i + 1
+    return m
+# define overlapping constraints
+def define_overlapping_constraints(m, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times):
+    for j in range(num_jobs):
+        for t in range(num_tasks[j]):
+            for j2 in range(num_jobs):
+                for t2 in range(num_tasks[j2]):
+                    if (j!= j2):
+                        combinations = list(itertools.product([v for v in range(0, num_preferences[j][t])],
+                                                              [v for v in range(0, num_preferences[j2][t2])]))
+                        for combination in combinations:
+                            a = combination[0]
+                            b = combination[1]
+                            if (jobs[j][t][a][1]==jobs[j2][t2][b][1]):
+                                m += ((preference[j][t][a]*ends[j][t]) <= (preference[j2][t2][b]*starts[j2][t2])) | ((preference[j2][t2][b]*ends[j2][t2]) <= (preference[j][t][a]*starts[j][t]))
+    for i in range(0, num_jobs):
+        for t in range(num_tasks[i] - 1):
+            m += [starts[i][t + 1] >= ends[i][t]]
+    for i in range(0, num_jobs):
+        m += starts[i][0] >= release_times[i]
+    return m
+#
+# define waiting time constraints
+def define_waiting_time_constraints(m, num_jobs, num_preferences, jobs, starts, release_times):
+    for i in range(0, num_jobs):
+        for j in range(0, 1):
+            for k in range(0,num_preferences[i][j]):
+                if jobs[i][j][k][1]==13:
+                    m += ((preference[i][j][k]*starts[i][j]) - (preference[i][j][k]*release_times[i]) <= 3)         
+    return m
+#
+# define objective
+def objective(m, ends):
+    m.minimize(max(ends))
+    return m
+# define visualization
+def visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs):
+    df = pd.DataFrame(columns=('Start', 'End', 'Machine', 'Job', 'Name'))
+    for job_id in range(0, num_jobs):
+            for task_id in range(num_tasks[job_id]):
+                for alt_id in range(num_preferences[job_id][task_id]):
+                    if ((preference[job_id][task_id][alt_id]).value()):
+                        machine = jobs[job_id][task_id][alt_id][1]
+                        selected = alt_id
+                df.loc[ len(df) ] = [(starts[job_id][task_id]).value(), (ends[job_id][task_id]).value(),
+                                     machine, f""Job {job_id}"", f""task {job_id} {task_id}""]
+                print(
+                    ""  task_%i_%i starts at %i (alt %i, machine %i, duration %i)""
+                    % (job_id, task_id, (starts[job_id][task_id]).value(), selected, machine,
+                       (duration[job_id][task_id]).value())
+                )
+    df['Time'] = df['End'] - df['Start']  # Length on x-axis
+
+    fig = px.bar(df, orientation='h',
+                 base=""Start"", x=""Time"", y=""Machine"", color=""Job"", text=""Name"")
+    for i in range(len(fig['data'])):
+        fig['data'][i].width = 5
+    fig.show() 
+# solve
+(model, (starts, ends)) = model(horizon, num_tasks, num_jobs)
+model = define_preference_constraints(jobs, model)
+model = define_overlapping_constraints(model, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times)
+model = define_waiting_time_constraints(model, num_jobs, num_preferences, jobs, starts, release_times)
+model = objective(model, ends)
+sat = model.solve()
+if not sat: raise Exception(""No solution found."")
+
+# output
+print(""Makespan:"", max([b for a in ([e.value() for e in ends]) for b in a]))
+print(""Start times:"", [list(s.value()) for s in starts])
+print(""End times:"", [list(e.value()) for e in ends])
+# visualize
+visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs)"
+"Our goal is to devise an optimal schedule for Shiny Factory with a focus on minimizing makespan. The job specifications are recorded in source_machine_13.txt. However, we encounter a significant challenge: each job is associated with a random release time. Additionally, we have imposed a specific criterion for the 7-Head Machine—if its waiting time exceeds three units, we must explore alternative machine options. Once we address this scheduling complexity, it is crucial to meticulously document and visually present the solutions to facilitate comprehensive analysis and evaluation.","# imports
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from cpmpy import *
+import random
+import itertools
+from itertools import permutations
+from pathlib import Path
+import ast
+# configurations
+random.seed(1)
+duration = []
+preference = []
+maximum_release_time = 5
+machines = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,
+            20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,37,38,39,40,41,42,43,44]
+# utility functions
+def get_jobs():
+    # data input, each job have several operations and each operation can be processed by one of the alternative machines.
+    return ast.literal_eval(Path('source_machine_13.txt').read_text())
+def get_job_count(jobs):
+    return len(jobs)
+def get_number_of_tasks(jobs, num_jobs):
+    return [len(jobs[i]) for i in range(0, num_jobs)]
+def get_number_of_preferences(jobs, num_tasks, num_jobs):
+    return [[len(jobs[i][j]) for j in range(0, num_tasks[i])] for i in range(0, num_jobs)]
+def get_release_times(num_jobs, maximum_release_time):
+    release_times = []
+    for i in range(0, num_jobs):
+        release_times.append(random.randint(0, maximum_release_time))
+    return release_times
+def get_horizon(jobs, release_times):
+    horizon = 0 # maximum time to process all jobs (use the )
+    for job in jobs:
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            horizon += max_task_duration
+    return (horizon + sum(release_times))
+# waiting time related utility functions
+def special_adjustment_for_machine_13(jobs, num_jobs, machines):
+    for i in range(0, num_jobs):
+        for j in range(0, 1):
+            for k in range(0,len(jobs[i][j])):
+                if jobs[i][j][k][1]==13:
+                    for machine in machines:
+                        if machine != 13:
+                            jobs[i][j].append((jobs[i][j][k][0], machine))
+    return jobs
+# data preparation
+jobs = get_jobs()
+num_jobs = get_job_count(jobs)
+jobs = special_adjustment_for_machine_13(jobs, num_jobs, machines)
+num_tasks = get_number_of_tasks(jobs, num_jobs)
+num_preferences = get_number_of_preferences(jobs, num_tasks, num_jobs)
+release_times = get_release_times(num_jobs, maximum_release_time)
+horizon = get_horizon(jobs, release_times)
+# define model
+def model(horizon, num_tasks, num_jobs):
+    starts = [intvar(0, horizon, shape=num_tasks[i], name=f""start_{i}"") for i in range(0, num_jobs)]
+    ends = [intvar(0, horizon, shape=num_tasks[i], name=f""end_{i}"") for i in range(0, num_jobs)]
+    m = Model()
+    return m, (starts, ends)
+# define preference constraints
+def define_preference_constraints(jobs, m):
+    i=0
+    j=0
+    for job in jobs:
+        temp_dur = []
+        temp_st = []
+        temp_en = []
+        temp_pref = []
+        j=0
+        for task in job:
+            min_duration = task[0][0]
+            max_duration = task[0][0]
+            k=0
+            temp_choice = []
+            for choice in task:
+                min_duration = min([min_duration, choice[0]])
+                max_duration = max([max_duration, choice[0]])
+                t_c = boolvar(shape=1, name=f""ch_{i}_{j}_{k}"")
+                temp_choice.append(t_c)
+                k = k + 1
+            dur = intvar(min_duration, max_duration, shape=1, name=f""dur_{i}_{j}"")
+            b = 0
+            c = 0
+            for a in range(0, len(temp_choice)):
+                b = b + temp_choice[a]
+                c = c + temp_choice[a]*task[a][0]
+            m += (b == 1)
+            m += (c == dur)
+            m += (ends[i][j] == starts[i][j] + dur)
+            temp_dur.append(dur)
+            temp_pref.append(temp_choice)
+            j = j + 1
+        duration.append(temp_dur)
+        preference.append(temp_pref)
+        i = i + 1
+    return m
+# define overlapping constraints
+def define_overlapping_constraints(m, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times):
+    for j in range(num_jobs):
+        for t in range(num_tasks[j]):
+            for j2 in range(num_jobs):
+                for t2 in range(num_tasks[j2]):
+                    if (j!= j2):
+                        combinations = list(itertools.product([v for v in range(0, num_preferences[j][t])],
+                                                              [v for v in range(0, num_preferences[j2][t2])]))
+                        for combination in combinations:
+                            a = combination[0]
+                            b = combination[1]
+                            if (jobs[j][t][a][1]==jobs[j2][t2][b][1]):
+                                m += ((preference[j][t][a]*ends[j][t]) <= (preference[j2][t2][b]*starts[j2][t2])) | ((preference[j2][t2][b]*ends[j2][t2]) <= (preference[j][t][a]*starts[j][t]))
+    for i in range(0, num_jobs):
+        for t in range(num_tasks[i] - 1):
+            m += [starts[i][t + 1] >= ends[i][t]]
+    for i in range(0, num_jobs):
+        m += starts[i][0] >= release_times[i]
+    return m
+# define waiting time constraints
+def define_waiting_time_constraints(m, num_jobs, num_preferences, jobs, starts, release_times):
+    for i in range(0, num_jobs):
+        for j in range(0, 1):
+            for k in range(0,num_preferences[i][j]):
+                if jobs[i][j][k][1]==13:
+                    m += ((preference[i][j][k]*starts[i][j]) - (preference[i][j][k]*release_times[i]) <= 3)         
+    return m
+# define objective
+def objective(m, ends):
+    m.minimize(max(ends))
+    return m
+# define visualization
+def visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs):
+    df = pd.DataFrame(columns=('Start', 'End', 'Machine', 'Job', 'Name'))
+    for job_id in range(0, num_jobs):
+            for task_id in range(num_tasks[job_id]):
+                for alt_id in range(num_preferences[job_id][task_id]):
+                    if ((preference[job_id][task_id][alt_id]).value()):
+                        machine = jobs[job_id][task_id][alt_id][1]
+                        selected = alt_id
+                df.loc[ len(df) ] = [(starts[job_id][task_id]).value(), (ends[job_id][task_id]).value(),
+                                     machine, f""Job {job_id}"", f""task {job_id} {task_id}""]
+                print(
+                    ""  task_%i_%i starts at %i (alt %i, machine %i, duration %i)""
+                    % (job_id, task_id, (starts[job_id][task_id]).value(), selected, machine,
+                       (duration[job_id][task_id]).value())
+                )
+    df['Time'] = df['End'] - df['Start']  # Length on x-axis
+
+    fig = px.bar(df, orientation='h',
+                 base=""Start"", x=""Time"", y=""Machine"", color=""Job"", text=""Name"")
+    for i in range(len(fig['data'])):
+        fig['data'][i].width = 5
+    fig.show() 
+# solve
+(model, (starts, ends)) = model(horizon, num_tasks, num_jobs)
+model = define_preference_constraints(jobs, model)
+model = define_overlapping_constraints(model, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times)
+model = define_waiting_time_constraints(model, num_jobs, num_preferences, jobs, starts, release_times)
+model = objective(model, ends)
+sat = model.solve()
+if not sat: raise Exception(""No solution found."")
+
+# output
+print(""Makespan:"", max([b for a in ([e.value() for e in ends]) for b in a]))
+print(""Start times:"", [list(s.value()) for s in starts])
+print(""End times:"", [list(e.value()) for e in ends])
+# visualize
+visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs)",7,29,"
+# imports
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from cpmpy import *
+import random
+import itertools
+from itertools import permutations
+from pathlib import Path
+import ast
+# configurations
+random.seed(1)
+duration = []
+preference = []
+maximum_release_time = 5
+machines = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,
+            20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,37,38,39,40,41,42,43,44]
+# waiting time related utility functions
+def special_adjustment_for_machine_13(jobs, num_jobs, machines):
+    for i in range(0, num_jobs):
+        for j in range(0, 1):
+            for k in range(0,len(jobs[i][j])):
+                if jobs[i][j][k][1]==13:
+                    for machine in machines:
+                        if machine!= 13:
+                            jobs[i][j].append((jobs[i][j][k][0], machine))
+    return jobs
+#
+# utility functions
+def get_jobs():
+    # data input, each job have several operations and each operation can be processed by one of the alternative machines.
+    return ast.literal_eval(Path('source_machine_13.txt').read_text())
+def get_job_count(jobs):
+    return len(jobs)
+def get_number_of_tasks(jobs, num_jobs):
+    return [len(jobs[i]) for i in range(0, num_jobs)]
+def get_number_of_preferences(jobs, num_tasks, num_jobs):
+    return [[len(jobs[i][j]) for j in range(0, num_tasks[i])] for i in range(0, num_jobs)]
+def get_release_times(num_jobs, maximum_release_time):
+    release_times = []
+    for i in range(0, num_jobs):
+        release_times.append(random.randint(0, maximum_release_time))
+    return release_times
+def get_horizon(jobs, release_times):
+    horizon = 0 # maximum time to process all jobs (use the )
+    for job in jobs:
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            horizon += max_task_duration
+    return (horizon + sum(release_times))
+#
+# data preparation
+jobs = get_jobs()
+num_jobs = get_job_count(jobs)
+jobs = special_adjustment_for_machine_13(jobs, num_jobs, machines)
+num_tasks = get_number_of_tasks(jobs, num_jobs)
+num_preferences = get_number_of_preferences(jobs, num_tasks, num_jobs)
+release_times = get_release_times(num_jobs, maximum_release_time)
+horizon = get_horizon(jobs, release_times)
+# define model
+def model(horizon, num_tasks, num_jobs):
+    starts = [intvar(0, horizon, shape=num_tasks[i], name=f""start_{i}"") for i in range(0, num_jobs)]
+    ends = [intvar(0, horizon, shape=num_tasks[i], name=f""end_{i}"") for i in range(0, num_jobs)]
+    m = Model()
+    return m, (starts, ends)
+# define preference constraints
+def define_preference_constraints(jobs, m):
+    i=0
+    j=0
+    for job in jobs:
+        temp_dur = []
+        temp_st = []
+        temp_en = []
+        temp_pref = []
+        j=0
+        for task in job:
+            min_duration = task[0][0]
+            max_duration = task[0][0]
+            k=0
+            temp_choice = []
+            for choice in task:
+                min_duration = min([min_duration, choice[0]])
+                max_duration = max([max_duration, choice[0]])
+                t_c = boolvar(shape=1, name=f""ch_{i}_{j}_{k}"")
+                temp_choice.append(t_c)
+                k = k + 1
+            dur = intvar(min_duration, max_duration, shape=1, name=f""dur_{i}_{j}"")
+            b = 0
+            c = 0
+            for a in range(0, len(temp_choice)):
+                b = b + temp_choice[a]
+                c = c + temp_choice[a]*task[a][0]
+            m += (b == 1)
+            m += (c == dur)
+            m += (ends[i][j] == starts[i][j] + dur)
+            temp_dur.append(dur)
+            temp_pref.append(temp_choice)
+            j = j + 1
+        duration.append(temp_dur)
+        preference.append(temp_pref)
+        i = i + 1
+    return m
+# define overlapping constraints
+def define_overlapping_constraints(m, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times):
+    for j in range(num_jobs):
+        for t in range(num_tasks[j]):
+            for j2 in range(num_jobs):
+                for t2 in range(num_tasks[j2]):
+                    if (j!= j2):
+                        combinations = list(itertools.product([v for v in range(0, num_preferences[j][t])],
+                                                              [v for v in range(0, num_preferences[j2][t2])]))
+                        for combination in combinations:
+                            a = combination[0]
+                            b = combination[1]
+                            if (jobs[j][t][a][1]==jobs[j2][t2][b][1]):
+                                m += ((preference[j][t][a]*ends[j][t]) <= (preference[j2][t2][b]*starts[j2][t2])) | ((preference[j2][t2][b]*ends[j2][t2]) <= (preference[j][t][a]*starts[j][t]))
+    for i in range(0, num_jobs):
+        for t in range(num_tasks[i] - 1):
+            m += [starts[i][t + 1] >= ends[i][t]]
+    for i in range(0, num_jobs):
+        m += starts[i][0] >= release_times[i]
+    return m
+#
+# define waiting time constraints
+def define_waiting_time_constraints(m, num_jobs, num_preferences, jobs, starts, release_times):
+    for i in range(0, num_jobs):
+        for j in range(0, 1):
+            for k in range(0,num_preferences[i][j]):
+                if jobs[i][j][k][1]==13:
+                    m += ((preference[i][j][k]*starts[i][j]) - (preference[i][j][k]*release_times[i]) <= 3)         
+    return m
+#
+# define objective
+def objective(m, ends):
+    m.minimize(max(ends))
+    return m
+# define visualization
+def visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs):
+    df = pd.DataFrame(columns=('Start', 'End', 'Machine', 'Job', 'Name'))
+    for job_id in range(0, num_jobs):
+            for task_id in range(num_tasks[job_id]):
+                for alt_id in range(num_preferences[job_id][task_id]):
+                    if ((preference[job_id][task_id][alt_id]).value()):
+                        machine = jobs[job_id][task_id][alt_id][1]
+                        selected = alt_id
+                df.loc[ len(df) ] = [(starts[job_id][task_id]).value(), (ends[job_id][task_id]).value(),
+                                     machine, f""Job {job_id}"", f""task {job_id} {task_id}""]
+                print(
+                    ""  task_%i_%i starts at %i (alt %i, machine %i, duration %i)""
+                    % (job_id, task_id, (starts[job_id][task_id]).value(), selected, machine,
+                       (duration[job_id][task_id]).value())
+                )
+    df['Time'] = df['End'] - df['Start']  # Length on x-axis
+
+    fig = px.bar(df, orientation='h',
+                 base=""Start"", x=""Time"", y=""Machine"", color=""Job"", text=""Name"")
+    for i in range(len(fig['data'])):
+        fig['data'][i].width = 5
+    fig.show() 
+# solve
+(model, (starts, ends)) = model(horizon, num_tasks, num_jobs)
+model = define_preference_constraints(jobs, model)
+model = define_overlapping_constraints(model, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times)
+model = define_waiting_time_constraints(model, num_jobs, num_preferences, jobs, starts, release_times)
+model = objective(model, ends)
+sat = model.solve()
+if not sat: raise Exception(""No solution found."")
+
+# output
+print(""Makespan:"", max([b for a in ([e.value() for e in ends]) for b in a]))
+print(""Start times:"", [list(s.value()) for s in starts])
+print(""End times:"", [list(e.value()) for e in ends])
+# visualize
+visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs)"
+"Our objective is to devise a schedule for Shiny Factory aimed at minimizing maximum tardiness. The job specifications, including quantity labels such as very small, small, and large, are outlined in the source-quantity.txt file. Tasks labeled as very small quantities will be managed by the Little Fang Machine, while those with small quantities will be handled by the 7-Head Machine. However, it's crucial to note that if a job's quantity exceeds a machine's capacity, it won't be processed by that machine. Due dates are determined by multiplying each job's total processing time by a due date allowance of 1.3. Additionally, jobs will have random release times, adding complexity to the scheduling process. Upon successfully addressing this challenge, we must ensure that the solutions are meticulously documented and visually represented for comprehensive evaluation.","# imports
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from cpmpy import *
+import random
+import itertools
+from itertools import permutations
+from pathlib import Path
+import ast
+# configurations
+random.seed(1)
+duration = []
+preference = []
+maximum_release_time = 5
+due_date_allowance = 1.3
+quantity_types = ['very_small', 'small', 'large']
+machines = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,
+            20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,37,38,39,40,41,42,43,44]
+# utility functions
+def get_jobs():
+    # data input, each job have several operations and each operation can be processed by one of the alternative machines.
+    return ast.literal_eval(Path('source-quantity.txt').read_text())
+def get_job_count(jobs):
+    return len(jobs)
+def get_quantities_per_job(num_jobs, quantity_types):
+    quantities_per_job = []
+    for i in range(0, num_jobs):
+        quantities_per_job.append(quantity_types[random.randint(0, len(quantity_types)-1)])
+    return quantities_per_job
+# quantity related utility functions
+def special_adjustment_for_machine_13(jobs, num_jobs, machines):
+    for i in range(0, num_jobs):
+        for j in range(0, len(jobs[i])):
+            for k in range(0,len(jobs[i][j])):
+                if jobs[i][j][k][1]==13:
+                    if (quantities_per_job[i]!='small'):
+                        for machine in machines:
+                            if machine != 13 and machine != 16:
+                                jobs[i][j].append((jobs[i][j][k][0], machine))
+    return jobs
+def special_adjustment_for_machine_16(jobs, num_jobs, machines):
+    for i in range(0, num_jobs):
+        for j in range(0, len(jobs[i])):
+            for k in range(0,len(jobs[i][j])):
+                if jobs[i][j][k][1]==16:
+                    if (quantities_per_job[i]!='very_small'):
+                        for machine in machines:
+                            if machine != 16:
+                                jobs[i][j].append((jobs[i][j][k][0], machine))
+    return jobs
+def get_number_of_tasks(jobs, num_jobs):
+    return [len(jobs[i]) for i in range(0, num_jobs)]
+def get_number_of_preferences(jobs, num_tasks, num_jobs):
+    return [[len(jobs[i][j]) for j in range(0, num_tasks[i])] for i in range(0, num_jobs)]
+def get_due_dates(due_date_allowance, maximum_durations):
+    return (0 + due_date_allowance*np.asarray(maximum_durations)).astype(int).tolist()
+def get_release_times(num_jobs, maximum_release_time):
+    release_times = []
+    for i in range(0, num_jobs):
+        release_times.append(random.randint(0, maximum_release_time))
+    return release_times
+def get_horizon(jobs, release_times):
+    horizon = 0 # maximum time to process all jobs (use the )
+    for job in jobs:
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            horizon += max_task_duration
+    return (horizon + sum(release_times))
+# tardiness related utility functions
+def get_maximum_durations(jobs):
+    maximum_durations = []
+    for job in jobs:
+        maximum_duration_per_job = []
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            maximum_duration_per_job.append(max_task_duration)
+        maximum_durations.append(np.sum(maximum_duration_per_job))   
+    return maximum_durations
+# data preparation
+jobs = get_jobs()
+num_jobs = get_job_count(jobs)
+quantities_per_job = get_quantities_per_job(num_jobs, quantity_types)
+jobs = special_adjustment_for_machine_13(jobs, num_jobs, machines)
+jobs = special_adjustment_for_machine_16(jobs, num_jobs, machines)
+num_tasks = get_number_of_tasks(jobs, num_jobs)
+num_preferences = get_number_of_preferences(jobs, num_tasks, num_jobs)
+maximum_durations = get_maximum_durations(jobs)
+due_dates = get_due_dates(due_date_allowance, maximum_durations)
+release_times = get_release_times(num_jobs, maximum_release_time)
+horizon = get_horizon(jobs, release_times)
+# define model
+def get_model(horizon, num_tasks, num_jobs):
+    starts = [intvar(0, horizon, shape=num_tasks[i], name=f""start_{i}"") for i in range(0, num_jobs)]
+    ends = [intvar(0, horizon, shape=num_tasks[i], name=f""end_{i}"") for i in range(0, num_jobs)]
+    tardiness = intvar(0, horizon, shape=(num_jobs), name=""tardiness"")
+    m = Model()
+    return m, (starts, ends, tardiness)
+# define preference constraints
+def define_preference_constraints(jobs, m):
+    i=0
+    j=0
+    for job in jobs:
+        temp_dur = []
+        temp_st = []
+        temp_en = []
+        temp_pref = []
+        j=0
+        for task in job:
+            min_duration = task[0][0]
+            max_duration = task[0][0]
+            k=0
+            temp_choice = []
+            for choice in task:
+                min_duration = min([min_duration, choice[0]])
+                max_duration = max([max_duration, choice[0]])
+                t_c = boolvar(shape=1, name=f""ch_{i}_{j}_{k}"")
+                temp_choice.append(t_c)
+                k = k + 1
+            dur = intvar(min_duration, max_duration, shape=1, name=f""dur_{i}_{j}"")
+            b = 0
+            c = 0
+            for a in range(0, len(temp_choice)):
+                b = b + temp_choice[a]
+                c = c + temp_choice[a]*task[a][0]
+            m += (b == 1)
+            m += (c == dur)
+            m += (ends[i][j] == starts[i][j] + dur)
+            temp_dur.append(dur)
+            temp_pref.append(temp_choice)
+            j = j + 1
+        duration.append(temp_dur)
+        preference.append(temp_pref)
+        i = i + 1
+    return m
+# define overlapping constraints
+def define_overlapping_constraints(m, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times):
+    for j in range(num_jobs):
+        for t in range(num_tasks[j]):
+            for j2 in range(num_jobs):
+                for t2 in range(num_tasks[j2]):
+                    if (j!= j2):
+                        combinations = list(itertools.product([v for v in range(0, num_preferences[j][t])],
+                                                              [v for v in range(0, num_preferences[j2][t2])]))
+                        for combination in combinations:
+                            a = combination[0]
+                            b = combination[1]
+                            if (jobs[j][t][a][1]==jobs[j2][t2][b][1]):
+                                m += ((preference[j][t][a]*ends[j][t]) <= (preference[j2][t2][b]*starts[j2][t2])) | ((preference[j2][t2][b]*ends[j2][t2]) <= (preference[j][t][a]*starts[j][t]))
+    for i in range(0, num_jobs):
+        for t in range(num_tasks[i] - 1):
+            m += [starts[i][t + 1] >= ends[i][t]]
+    for i in range(0, num_jobs):
+        m += starts[i][0] >= release_times[i]
+    return m
+def tardiness_constraints(m, num_jobs, tardiness, due_dates):
+    for j in range(num_jobs):
+        m += (tardiness[j] == max([ends[j][(num_tasks[j] -1)] - due_dates[j], 0]))
+    return m
+# define quantity constraints
+def define_quantity_constraints(m, num_jobs, num_tasks, num_preferences, quantities_per_job, jobs):
+    for i in range(0, num_jobs):
+        for j in range(0, num_tasks[i]):
+            for k in range(0,num_preferences[i][j]):
+                if jobs[i][j][k][1]==13:
+                    if (quantities_per_job[i]=='small'):
+                        m += (preference[i][j][k]==1)
+                    else:
+                        m += (preference[i][j][k]==0)
+    for i in range(0, num_jobs):
+        for j in range(0, num_tasks[i]):
+            for k in range(0,num_preferences[i][j]):
+                if jobs[i][j][k][1]==16:
+                    if (quantities_per_job[i]=='very_small'):
+                        m += (preference[i][j][k]==1)
+                    else:
+                        m += (preference[i][j][k]==0)
+    return m
+# define objective
+def objective(m, tardiness):
+    m.minimize(max(tardiness))
+    return m
+# define visualization
+def visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs):
+    df = pd.DataFrame(columns=('Start', 'End', 'Machine', 'Job', 'Name'))
+    for job_id in range(0, num_jobs):
+            for task_id in range(num_tasks[job_id]):
+                for alt_id in range(num_preferences[job_id][task_id]):
+                    if ((preference[job_id][task_id][alt_id]).value()):
+                        machine = jobs[job_id][task_id][alt_id][1]
+                        selected = alt_id
+                df.loc[ len(df) ] = [(starts[job_id][task_id]).value(), (ends[job_id][task_id]).value(),
+                                     machine, f""Job {job_id}"", f""task {job_id} {task_id}""]
+                print(
+                    ""  task_%i_%i starts at %i (alt %i, machine %i, duration %i)""
+                    % (job_id, task_id, (starts[job_id][task_id]).value(), selected, machine,
+                       (duration[job_id][task_id]).value())
+                )
+    df['Time'] = df['End'] - df['Start']  # Length on x-axis
+
+    fig = px.bar(df, orientation='h',
+                 base=""Start"", x=""Time"", y=""Machine"", color=""Job"", text=""Name"")
+    for i in range(len(fig['data'])):
+        fig['data'][i].width = 5
+    fig.show() 
+# solve
+(model, (starts, ends, tardiness)) = get_model(horizon, num_tasks, num_jobs)
+model = define_preference_constraints(jobs, model)
+model = define_overlapping_constraints(model, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times)
+model = define_quantity_constraints(model, num_jobs, num_tasks, num_preferences, quantities_per_job, jobs)
+model = tardiness_constraints(model, num_jobs, tardiness, due_dates)
+model = objective(model, tardiness)
+sat = model.solve()
+if not sat: raise Exception(""No solution found."")
+
+# output
+print(""Max Tardiness:"", max(tardiness.value()))
+print(""Start times:"", [list(s.value()) for s in starts])
+print(""End times:"", [list(e.value()) for e in ends])
+# visualize
+visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs)",3,38,"
+# imports
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from cpmpy import *
+import random
+import itertools
+from itertools import permutations
+from pathlib import Path
+import ast
+# configurations
+random.seed(1)
+duration = []
+preference = []
+maximum_release_time = 5
+due_date_allowance = 1.3
+quantity_types = ['very_small','small', 'large']
+machines = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,
+            20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,37,38,39,40,41,42,43,44]
+# quantity related utility functions
+def special_adjustment_for_machine_13(jobs, num_jobs, machines):
+    for i in range(0, num_jobs):
+        for j in range(0, len(jobs[i])):
+            for k in range(0,len(jobs[i][j])):
+                if jobs[i][j][k][1]==13:
+                    if (quantities_per_job[i]!='small'):
+                        for machine in machines:
+                            if machine!= 13 and machine!= 16:
+                                jobs[i][j].append((jobs[i][j][k][0], machine))
+    return jobs
+def special_adjustment_for_machine_16(jobs, num_jobs, machines):
+    for i in range(0, num_jobs):
+        for j in range(0, len(jobs[i])):
+            for k in range(0,len(jobs[i][j])):
+                if jobs[i][j][k][1]==16:
+                    if (quantities_per_job[i]!='very_small'):
+                        for machine in machines:
+                            if machine!= 16:
+                                jobs[i][j].append((jobs[i][j][k][0], machine))
+    return jobs
+# utility functions
+def get_jobs():
+    # data input, each job have several operations and each operation can be processed by one of the alternative machines.
+    return ast.literal_eval(Path('source-quantity.txt').read_text())
+def get_job_count(jobs):
+    return len(jobs)
+def get_quantities_per_job(num_jobs, quantity_types):
+    quantities_per_job = []
+    for i in range(0, num_jobs):
+        quantities_per_job.append(quantity_types[random.randint(0, len(quantity_types)-1)])
+    return quantities_per_job
+def get_number_of_tasks(jobs, num_jobs):
+    return [len(jobs[i]) for i in range(0, num_jobs)]
+def get_number_of_preferences(jobs, num_tasks, num_jobs):
+    return [[len(jobs[i][j]) for j in range(0, num_tasks[i])] for i in range(0, num_jobs)]
+def get_due_dates(due_date_allowance, maximum_durations):
+    return (0 + due_date_allowance*np.asarray(maximum_durations)).astype(int).tolist()
+def get_release_times(num_jobs, maximum_release_time):
+    release_times = []
+    for i in range(0, num_jobs):
+        release_times.append(random.randint(0, maximum_release_time))
+    return release_times
+def get_horizon(jobs, release_times):
+    horizon = 0 # maximum time to process all jobs (use the )
+    for job in jobs:
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            horizon += max_task_duration
+    return (horizon + sum(release_times))
+# tardiness related utility functions
+def get_maximum_durations(jobs):
+    maximum_durations = []
+    for job in jobs:
+        maximum_duration_per_job = []
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            maximum_duration_per_job.append(max_task_duration)
+        maximum_durations.append(np.sum(maximum_duration_per_job))   
+    return maximum_durations
+# data preparation
+jobs = get_jobs()
+num_jobs = get_job_count(jobs)
+quantities_per_job = get_quantities_per_job(num_jobs, quantity_types)
+jobs = special_adjustment_for_machine_13(jobs, num_jobs, machines)
+jobs = special_adjustment_for_machine_16(jobs, num_jobs, machines)
+num_tasks = get_number_of_tasks(jobs, num_jobs)
+num_preferences = get_number_of_preferences(jobs, num_tasks, num_jobs)
+maximum_durations = get_maximum_durations(jobs)
+due_dates = get_due_dates(due_date_allowance, maximum_durations)
+release_times = get_release_times(num_jobs, maximum_release_time)
+horizon = get_horizon(jobs, release_times)
+# define model
+def get_model(horizon, num_tasks, num_jobs):
+    starts = [intvar(0, horizon, shape=num_tasks[i], name=f""start_{i}"") for i in range(0, num_jobs)]
+    ends = [intvar(0, horizon, shape=num_tasks[i], name=f""end_{i}"") for i in range(0, num_jobs)]
+    tardiness = intvar(0, horizon, shape=(num_jobs), name=""tardiness"")
+    m = Model()
+    return m, (starts, ends, tardiness)
+# define preference constraints
+def define_preference_constraints(jobs, m):
+    i=0
+    j=0
+    for job in jobs:
+        temp_dur = []
+        temp_st = []
+        temp_en = []
+        temp_pref = []
+        j=0
+        for task in job:
+            min_duration = task[0][0]
+            max_duration = task[0][0]
+            k=0
+            temp_choice = []
+            for choice in task:
+                min_duration = min([min_duration, choice[0]])
+                max_duration = max([max_duration, choice[0]])
+                t_c = boolvar(shape=1, name=f""ch_{i}_{j}_{k}"")
+                temp_choice.append(t_c)
+                k = k + 1
+            dur = intvar(min_duration, max_duration, shape=1, name=f""dur_{i}_{j}"")
+            b = 0
+            c = 0
+            for a in range(0, len(temp_choice)):
+                b = b + temp_choice[a]
+                c = c + temp_choice[a]*task[a][0]
+            m += (b == 1)
+            m += (c == dur)
+            m += (ends[i][j] == starts[i][j] + dur)
+            temp_dur.append(dur)
+            temp_pref.append(temp_choice)
+            j = j + 1
+        duration.append(temp_dur)
+        preference.append(temp_pref)
+        i = i + 1
+    return m
+# define overlapping constraints
+def define_overlapping_constraints(m, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times):
+    for j in range(num_jobs):
+        for t in range(num_tasks[j]):
+            for j2 in range(num_jobs):
+                for t2 in range(num_tasks[j2]):
+                    if (j!= j2):
+                        combinations = list(itertools.product([v for v in range(0, num_preferences[j][t])],
+                                                              [v for v in range(0, num_preferences[j2][t2])]))
+                        for combination in combinations:
+                            a = combination[0]
+                            b = combination[1]
+                            if (jobs[j][t][a][1]==jobs[j2][t2][b][1]):
+                                m += ((preference[j][t][a]*ends[j][t]) <= (preference[j2][t2][b]*starts[j2][t2])) | ((preference[j2][t2][b]*ends[j2][t2]) <= (preference[j][t][a]*starts[j][t]))
+    for i in range(0, num_jobs):
+        for t in range(num_tasks[i] - 1):
+            m += [starts[i][t + 1] >= ends[i][t]]
+    for i in range(0, num_jobs):
+        m += starts[i][0] >= release_times[i]
+    return m
+# define quantity constraints
+def define_quantity_constraints(m, num_jobs, num_tasks, num_preferences, quantities_per_job, jobs):
+    for i in range(0, num_jobs):
+        for j in range(0, num_tasks[i]):
+            for k in range(0,num_preferences[i][j]):
+                if jobs[i][j][k][1]==13:
+                    if (quantities_per_job[i]=='small'):
+                        m += (preference[i][j][k]==1)
+                    else:
+                        m += (preference[i][j][k]==0)
+    for i in range(0, num_jobs):
+        for j in range(0, num_tasks[i]):
+            for k in range(0,num_preferences[i][j]):
+                if jobs[i][j][k][1]==16:
+                    if (quantities_per_job[i]=='very_small'):
+                        m += (preference[i][j][k]==1)
+                    else:
+                        m += (preference[i][j][k]==0)
+    return m
+#
+def tardiness_constraints(m, num_jobs, tardiness, due_dates):
+    for j in range(num_jobs):
+        m += (tardiness[j] == max([ends[j][(num_tasks[j] -1)] - due_dates[j], 0]))
+    return m
+# define objective
+def objective(m, tardiness):
+    m.minimize(max(tardiness))
+    return m
+# define visualization
+def visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs):
+    df = pd.DataFrame(columns=('Start', 'End', 'Machine', 'Job', 'Name'))
+    for job_id in range(0, num_jobs):
+            for task_id in range(num_tasks[job_id]):
+                for alt_id in range(num_preferences[job_id][task_id]):
+                    if ((preference[job_id][task_id][alt_id]).value()):
+                        machine = jobs[job_id][task_id][alt_id][1]
+                        selected = alt_id
+                df.loc[ len(df) ] = [(starts[job_id][task_id]).value(), (ends[job_id][task_id]).value(),
+                                     machine, f""Job {job_id}"", f""task {job_id} {task_id}""]
+                print(
+                    ""  task_%i_%i starts at %i (alt %i, machine %i, duration %i)""
+                    % (job_id, task_id, (starts[job_id][task_id]).value(), selected, machine,
+                       (duration[job_id][task_id]).value())
+                )
+    df['Time'] = df['End'] - df['Start']  # Length on x-axis
+
+    fig = px.bar(df, orientation='h',
+                 base=""Start"", x=""Time"", y=""Machine"", color=""Job"", text=""Name"")
+    for i in range(len(fig['data'])):
+        fig['data'][i].width = 5
+    fig.show() 
+# solve
+(model, (starts, ends, tardiness)) = get_model(horizon, num_tasks, num_jobs)
+model = define_preference_constraints(jobs, model)
+model = define_overlapping_constraints(model, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times)
+model = define_quantity_constraints(model, num_jobs, num_tasks, num_preferences, quantities_per_job, jobs)
+model = tardiness_constraints(model, num_jobs, tardiness, due_dates)
+model = objective(model, tardiness)
+sat = model.solve()
+if not sat: raise Exception(""No solution found."")
+
+# output
+print(""Max Tardiness:"", max(tardiness.value()))
+print(""Start times:"", [list(s.value()) for s in starts])
+print(""End times:"", [list(e.value()) for e in ends])
+# visualize
+visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs)"
+"We need to develop a schedule for Shiny Factory with the goal of minimizing makespan. The job specifications are in the source_machine_13.txt file, but there's a challenge: the jobs have random release times. Additionally, there's a constraint for the 7-Head Machine. if it experiences more than 2 units of waiting time, we should consider using another machine. Once the problem is solved, please print and visually present the solutions for thorough analysis.","# imports
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from cpmpy import *
+import random
+import itertools
+from itertools import permutations
+from pathlib import Path
+import ast
+# configurations
+random.seed(1)
+duration = []
+preference = []
+maximum_release_time = 5
+machines = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,
+            20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,37,38,39,40,41,42,43,44]
+# utility functions
+def get_jobs():
+    # data input, each job have several operations and each operation can be processed by one of the alternative machines.
+    return ast.literal_eval(Path('source_machine_13.txt').read_text())
+def get_job_count(jobs):
+    return len(jobs)
+def get_number_of_tasks(jobs, num_jobs):
+    return [len(jobs[i]) for i in range(0, num_jobs)]
+def get_number_of_preferences(jobs, num_tasks, num_jobs):
+    return [[len(jobs[i][j]) for j in range(0, num_tasks[i])] for i in range(0, num_jobs)]
+def get_release_times(num_jobs, maximum_release_time):
+    release_times = []
+    for i in range(0, num_jobs):
+        release_times.append(random.randint(0, maximum_release_time))
+    return release_times
+def get_horizon(jobs, release_times):
+    horizon = 0 # maximum time to process all jobs (use the )
+    for job in jobs:
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            horizon += max_task_duration
+    return (horizon + sum(release_times))
+# waiting time related utility functions
+def special_adjustment_for_machine_13(jobs, num_jobs, machines):
+    for i in range(0, num_jobs):
+        for j in range(0, 1):
+            for k in range(0,len(jobs[i][j])):
+                if jobs[i][j][k][1]==13:
+                    for machine in machines:
+                        if machine != 13:
+                            jobs[i][j].append((jobs[i][j][k][0], machine))
+    return jobs
+# data preparation
+jobs = get_jobs()
+num_jobs = get_job_count(jobs)
+jobs = special_adjustment_for_machine_13(jobs, num_jobs, machines)
+num_tasks = get_number_of_tasks(jobs, num_jobs)
+num_preferences = get_number_of_preferences(jobs, num_tasks, num_jobs)
+release_times = get_release_times(num_jobs, maximum_release_time)
+horizon = get_horizon(jobs, release_times)
+# define model
+def model(horizon, num_tasks, num_jobs):
+    starts = [intvar(0, horizon, shape=num_tasks[i], name=f""start_{i}"") for i in range(0, num_jobs)]
+    ends = [intvar(0, horizon, shape=num_tasks[i], name=f""end_{i}"") for i in range(0, num_jobs)]
+    m = Model()
+    return m, (starts, ends)
+# define preference constraints
+def define_preference_constraints(jobs, m):
+    i=0
+    j=0
+    for job in jobs:
+        temp_dur = []
+        temp_st = []
+        temp_en = []
+        temp_pref = []
+        j=0
+        for task in job:
+            min_duration = task[0][0]
+            max_duration = task[0][0]
+            k=0
+            temp_choice = []
+            for choice in task:
+                min_duration = min([min_duration, choice[0]])
+                max_duration = max([max_duration, choice[0]])
+                t_c = boolvar(shape=1, name=f""ch_{i}_{j}_{k}"")
+                temp_choice.append(t_c)
+                k = k + 1
+            dur = intvar(min_duration, max_duration, shape=1, name=f""dur_{i}_{j}"")
+            b = 0
+            c = 0
+            for a in range(0, len(temp_choice)):
+                b = b + temp_choice[a]
+                c = c + temp_choice[a]*task[a][0]
+            m += (b == 1)
+            m += (c == dur)
+            m += (ends[i][j] == starts[i][j] + dur)
+            temp_dur.append(dur)
+            temp_pref.append(temp_choice)
+            j = j + 1
+        duration.append(temp_dur)
+        preference.append(temp_pref)
+        i = i + 1
+    return m
+# define overlapping constraints
+def define_overlapping_constraints(m, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times):
+    for j in range(num_jobs):
+        for t in range(num_tasks[j]):
+            for j2 in range(num_jobs):
+                for t2 in range(num_tasks[j2]):
+                    if (j!= j2):
+                        combinations = list(itertools.product([v for v in range(0, num_preferences[j][t])],
+                                                              [v for v in range(0, num_preferences[j2][t2])]))
+                        for combination in combinations:
+                            a = combination[0]
+                            b = combination[1]
+                            if (jobs[j][t][a][1]==jobs[j2][t2][b][1]):
+                                m += ((preference[j][t][a]*ends[j][t]) <= (preference[j2][t2][b]*starts[j2][t2])) | ((preference[j2][t2][b]*ends[j2][t2]) <= (preference[j][t][a]*starts[j][t]))
+    for i in range(0, num_jobs):
+        for t in range(num_tasks[i] - 1):
+            m += [starts[i][t + 1] >= ends[i][t]]
+    for i in range(0, num_jobs):
+        m += starts[i][0] >= release_times[i]
+    return m
+# define waiting time constraints
+def define_waiting_time_constraints(m, num_jobs, num_preferences, jobs, starts, release_times):
+    for i in range(0, num_jobs):
+        for j in range(0, 1):
+            for k in range(0,num_preferences[i][j]):
+                if jobs[i][j][k][1]==13:
+                    m += ((preference[i][j][k]*starts[i][j]) - (preference[i][j][k]*release_times[i]) <= 2)         
+    return m
+# define objective
+def objective(m, ends):
+    m.minimize(max(ends))
+    return m
+# define visualization
+def visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs):
+    df = pd.DataFrame(columns=('Start', 'End', 'Machine', 'Job', 'Name'))
+    for job_id in range(0, num_jobs):
+            for task_id in range(num_tasks[job_id]):
+                for alt_id in range(num_preferences[job_id][task_id]):
+                    if ((preference[job_id][task_id][alt_id]).value()):
+                        machine = jobs[job_id][task_id][alt_id][1]
+                        selected = alt_id
+                df.loc[ len(df) ] = [(starts[job_id][task_id]).value(), (ends[job_id][task_id]).value(),
+                                     machine, f""Job {job_id}"", f""task {job_id} {task_id}""]
+                print(
+                    ""  task_%i_%i starts at %i (alt %i, machine %i, duration %i)""
+                    % (job_id, task_id, (starts[job_id][task_id]).value(), selected, machine,
+                       (duration[job_id][task_id]).value())
+                )
+    df['Time'] = df['End'] - df['Start']  # Length on x-axis
+
+    fig = px.bar(df, orientation='h',
+                 base=""Start"", x=""Time"", y=""Machine"", color=""Job"", text=""Name"")
+    for i in range(len(fig['data'])):
+        fig['data'][i].width = 5
+    fig.show() 
+# solve
+(model, (starts, ends)) = model(horizon, num_tasks, num_jobs)
+model = define_preference_constraints(jobs, model)
+model = define_overlapping_constraints(model, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times)
+model = define_waiting_time_constraints(model, num_jobs, num_preferences, jobs, starts, release_times)
+model = objective(model, ends)
+sat = model.solve()
+if not sat: raise Exception(""No solution found."")
+
+# output
+print(""Makespan:"", max([b for a in ([e.value() for e in ends]) for b in a]))
+print(""Start times:"", [list(s.value()) for s in starts])
+print(""End times:"", [list(e.value()) for e in ends])
+# visualize
+visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs)",7,18,"
+# imports
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from cpmpy import *
+import random
+import itertools
+from itertools import permutations
+from pathlib import Path
+import ast
+# configurations
+random.seed(1)
+duration = []
+preference = []
+maximum_release_time = 5
+machines = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,
+            20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,37,38,39,40,41,42,43,44]
+# waiting time related utility functions
+def special_adjustment_for_machine_13(jobs, num_jobs, machines):
+    for i in range(0, num_jobs):
+        for j in range(0, 1):
+            for k in range(0,len(jobs[i][j])):
+                if jobs[i][j][k][1]==13:
+                    for machine in machines:
+                        if machine!= 13:
+                            jobs[i][j].append((jobs[i][j][k][0], machine))
+    return jobs
+#
+# utility functions
+def get_jobs():
+    # data input, each job have several operations and each operation can be processed by one of the alternative machines.
+    return ast.literal_eval(Path('source_machine_13.txt').read_text())
+def get_job_count(jobs):
+    return len(jobs)
+def get_number_of_tasks(jobs, num_jobs):
+    return [len(jobs[i]) for i in range(0, num_jobs)]
+def get_number_of_preferences(jobs, num_tasks, num_jobs):
+    return [[len(jobs[i][j]) for j in range(0, num_tasks[i])] for i in range(0, num_jobs)]
+def get_release_times(num_jobs, maximum_release_time):
+    release_times = []
+    for i in range(0, num_jobs):
+        release_times.append(random.randint(0, maximum_release_time))
+    return release_times
+def get_horizon(jobs, release_times):
+    horizon = 0 # maximum time to process all jobs (use the )
+    for job in jobs:
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            horizon += max_task_duration
+    return (horizon + sum(release_times))
+#
+# data preparation
+jobs = get_jobs()
+num_jobs = get_job_count(jobs)
+jobs = special_adjustment_for_machine_13(jobs, num_jobs, machines)
+num_tasks = get_number_of_tasks(jobs, num_jobs)
+num_preferences = get_number_of_preferences(jobs, num_tasks, num_jobs)
+release_times = get_release_times(num_jobs, maximum_release_time)
+horizon = get_horizon(jobs, release_times)
+# define model
+def model(horizon, num_tasks, num_jobs):
+    starts = [intvar(0, horizon, shape=num_tasks[i], name=f""start_{i}"") for i in range(0, num_jobs)]
+    ends = [intvar(0, horizon, shape=num_tasks[i], name=f""end_{i}"") for i in range(0, num_jobs)]
+    m = Model()
+    return m, (starts, ends)
+# define preference constraints
+def define_preference_constraints(jobs, m):
+    i=0
+    j=0
+    for job in jobs:
+        temp_dur = []
+        temp_st = []
+        temp_en = []
+        temp_pref = []
+        j=0
+        for task in job:
+            min_duration = task[0][0]
+            max_duration = task[0][0]
+            k=0
+            temp_choice = []
+            for choice in task:
+                min_duration = min([min_duration, choice[0]])
+                max_duration = max([max_duration, choice[0]])
+                t_c = boolvar(shape=1, name=f""ch_{i}_{j}_{k}"")
+                temp_choice.append(t_c)
+                k = k + 1
+            dur = intvar(min_duration, max_duration, shape=1, name=f""dur_{i}_{j}"")
+            b = 0
+            c = 0
+            for a in range(0, len(temp_choice)):
+                b = b + temp_choice[a]
+                c = c + temp_choice[a]*task[a][0]
+            m += (b == 1)
+            m += (c == dur)
+            m += (ends[i][j] == starts[i][j] + dur)
+            temp_dur.append(dur)
+            temp_pref.append(temp_choice)
+            j = j + 1
+        duration.append(temp_dur)
+        preference.append(temp_pref)
+        i = i + 1
+    return m
+# define overlapping constraints
+def define_overlapping_constraints(m, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times):
+    for j in range(num_jobs):
+        for t in range(num_tasks[j]):
+            for j2 in range(num_jobs):
+                for t2 in range(num_tasks[j2]):
+                    if (j!= j2):
+                        combinations = list(itertools.product([v for v in range(0, num_preferences[j][t])],
+                                                              [v for v in range(0, num_preferences[j2][t2])]))
+                        for combination in combinations:
+                            a = combination[0]
+                            b = combination[1]
+                            if (jobs[j][t][a][1]==jobs[j2][t2][b][1]):
+                                m += ((preference[j][t][a]*ends[j][t]) <= (preference[j2][t2][b]*starts[j2][t2])) | ((preference[j2][t2][b]*ends[j2][t2]) <= (preference[j][t][a]*starts[j][t]))
+    for i in range(0, num_jobs):
+        for t in range(num_tasks[i] - 1):
+            m += [starts[i][t + 1] >= ends[i][t]]
+    for i in range(0, num_jobs):
+        m += starts[i][0] >= release_times[i]
+    return m
+#
+# define waiting time constraints
+def define_waiting_time_constraints(m, num_jobs, num_preferences, jobs, starts, release_times):
+    for i in range(0, num_jobs):
+        for j in range(0, 1):
+            for k in range(0,num_preferences[i][j]):
+                if jobs[i][j][k][1]==13:
+                    m += ((preference[i][j][k]*starts[i][j]) - (preference[i][j][k]*release_times[i]) <= 2)         
+    return m
+#
+# define objective
+def objective(m, ends):
+    m.minimize(max(ends))
+    return m
+# define visualization
+def visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs):
+    df = pd.DataFrame(columns=('Start', 'End', 'Machine', 'Job', 'Name'))
+    for job_id in range(0, num_jobs):
+            for task_id in range(num_tasks[job_id]):
+                for alt_id in range(num_preferences[job_id][task_id]):
+                    if ((preference[job_id][task_id][alt_id]).value()):
+                        machine = jobs[job_id][task_id][alt_id][1]
+                        selected = alt_id
+                df.loc[ len(df) ] = [(starts[job_id][task_id]).value(), (ends[job_id][task_id]).value(),
+                                     machine, f""Job {job_id}"", f""task {job_id} {task_id}""]
+                print(
+                    ""  task_%i_%i starts at %i (alt %i, machine %i, duration %i)""
+                    % (job_id, task_id, (starts[job_id][task_id]).value(), selected, machine,
+                       (duration[job_id][task_id]).value())
+                )
+    df['Time'] = df['End'] - df['Start']  # Length on x-axis
+
+    fig = px.bar(df, orientation='h',
+                 base=""Start"", x=""Time"", y=""Machine"", color=""Job"", text=""Name"")
+    for i in range(len(fig['data'])):
+        fig['data'][i].width = 5
+    fig.show() 
+# solve
+(model, (starts, ends)) = model(horizon, num_tasks, num_jobs)
+model = define_preference_constraints(jobs, model)
+model = define_overlapping_constraints(model, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times)
+model = define_waiting_time_constraints(model, num_jobs, num_preferences, jobs, starts, release_times)
+model = objective(model, ends)
+sat = model.solve()
+if not sat: raise Exception(""No solution found."")
+
+# output
+print(""Makespan:"", max([b for a in ([e.value() for e in ends]) for b in a]))
+print(""Start times:"", [list(s.value()) for s in starts])
+print(""End times:"", [list(e.value()) for e in ends])
+# visualize
+visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs)"
+"We are tasked with creating a schedule for Shiny Factory that aims to minimize maximum tardiness. The job specifications are provided in the source-quantity.txt file and include quantity labels such as very small, small, and large. The Little Fang Machine will handle jobs labeled as very small quantities, while the 7-Head Machine will manage those with small quantities. If a job's quantity exceeds a machine's capacity, it will not be processed by that machine. Due dates are determined by multiplying each job's total processing time by a due date allowance of 1.3. Additionally, jobs will have random release times. Once we've successfully tackled this challenge, we'll ensure that the solutions are documented and visually represented. After successfully addressing this challenge, need to ensure that the solutions are thoroughly documented and visually represented.","# imports
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from cpmpy import *
+import random
+import itertools
+from itertools import permutations
+from pathlib import Path
+import ast
+# configurations
+random.seed(1)
+duration = []
+preference = []
+maximum_release_time = 5
+due_date_allowance = 1.3
+quantity_types = ['very_small', 'small', 'large']
+machines = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,
+            20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,37,38,39,40,41,42,43,44]
+# utility functions
+def get_jobs():
+    # data input, each job have several operations and each operation can be processed by one of the alternative machines.
+    return ast.literal_eval(Path('source-quantity.txt').read_text())
+def get_job_count(jobs):
+    return len(jobs)
+def get_quantities_per_job(num_jobs, quantity_types):
+    quantities_per_job = []
+    for i in range(0, num_jobs):
+        quantities_per_job.append(quantity_types[random.randint(0, len(quantity_types)-1)])
+    return quantities_per_job
+# quantity related utility functions
+def special_adjustment_for_machine_13(jobs, num_jobs, machines):
+    for i in range(0, num_jobs):
+        for j in range(0, len(jobs[i])):
+            for k in range(0,len(jobs[i][j])):
+                if jobs[i][j][k][1]==13:
+                    if (quantities_per_job[i]!='small'):
+                        for machine in machines:
+                            if machine != 13 and machine != 16:
+                                jobs[i][j].append((jobs[i][j][k][0], machine))
+    return jobs
+def special_adjustment_for_machine_16(jobs, num_jobs, machines):
+    for i in range(0, num_jobs):
+        for j in range(0, len(jobs[i])):
+            for k in range(0,len(jobs[i][j])):
+                if jobs[i][j][k][1]==16:
+                    if (quantities_per_job[i]!='very_small'):
+                        for machine in machines:
+                            if machine != 16:
+                                jobs[i][j].append((jobs[i][j][k][0], machine))
+    return jobs
+def get_number_of_tasks(jobs, num_jobs):
+    return [len(jobs[i]) for i in range(0, num_jobs)]
+def get_number_of_preferences(jobs, num_tasks, num_jobs):
+    return [[len(jobs[i][j]) for j in range(0, num_tasks[i])] for i in range(0, num_jobs)]
+def get_due_dates(due_date_allowance, maximum_durations):
+    return (0 + due_date_allowance*np.asarray(maximum_durations)).astype(int).tolist()
+def get_release_times(num_jobs, maximum_release_time):
+    release_times = []
+    for i in range(0, num_jobs):
+        release_times.append(random.randint(0, maximum_release_time))
+    return release_times
+def get_horizon(jobs, release_times):
+    horizon = 0 # maximum time to process all jobs (use the )
+    for job in jobs:
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            horizon += max_task_duration
+    return (horizon + sum(release_times))
+# tardiness related utility functions
+def get_maximum_durations(jobs):
+    maximum_durations = []
+    for job in jobs:
+        maximum_duration_per_job = []
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            maximum_duration_per_job.append(max_task_duration)
+        maximum_durations.append(np.sum(maximum_duration_per_job))   
+    return maximum_durations
+# data preparation
+jobs = get_jobs()
+num_jobs = get_job_count(jobs)
+quantities_per_job = get_quantities_per_job(num_jobs, quantity_types)
+jobs = special_adjustment_for_machine_13(jobs, num_jobs, machines)
+jobs = special_adjustment_for_machine_16(jobs, num_jobs, machines)
+num_tasks = get_number_of_tasks(jobs, num_jobs)
+num_preferences = get_number_of_preferences(jobs, num_tasks, num_jobs)
+maximum_durations = get_maximum_durations(jobs)
+due_dates = get_due_dates(due_date_allowance, maximum_durations)
+release_times = get_release_times(num_jobs, maximum_release_time)
+horizon = get_horizon(jobs, release_times)
+# define model
+def get_model(horizon, num_tasks, num_jobs):
+    starts = [intvar(0, horizon, shape=num_tasks[i], name=f""start_{i}"") for i in range(0, num_jobs)]
+    ends = [intvar(0, horizon, shape=num_tasks[i], name=f""end_{i}"") for i in range(0, num_jobs)]
+    tardiness = intvar(0, horizon, shape=(num_jobs), name=""tardiness"")
+    m = Model()
+    return m, (starts, ends, tardiness)
+# define preference constraints
+def define_preference_constraints(jobs, m):
+    i=0
+    j=0
+    for job in jobs:
+        temp_dur = []
+        temp_st = []
+        temp_en = []
+        temp_pref = []
+        j=0
+        for task in job:
+            min_duration = task[0][0]
+            max_duration = task[0][0]
+            k=0
+            temp_choice = []
+            for choice in task:
+                min_duration = min([min_duration, choice[0]])
+                max_duration = max([max_duration, choice[0]])
+                t_c = boolvar(shape=1, name=f""ch_{i}_{j}_{k}"")
+                temp_choice.append(t_c)
+                k = k + 1
+            dur = intvar(min_duration, max_duration, shape=1, name=f""dur_{i}_{j}"")
+            b = 0
+            c = 0
+            for a in range(0, len(temp_choice)):
+                b = b + temp_choice[a]
+                c = c + temp_choice[a]*task[a][0]
+            m += (b == 1)
+            m += (c == dur)
+            m += (ends[i][j] == starts[i][j] + dur)
+            temp_dur.append(dur)
+            temp_pref.append(temp_choice)
+            j = j + 1
+        duration.append(temp_dur)
+        preference.append(temp_pref)
+        i = i + 1
+    return m
+# define overlapping constraints
+def define_overlapping_constraints(m, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times):
+    for j in range(num_jobs):
+        for t in range(num_tasks[j]):
+            for j2 in range(num_jobs):
+                for t2 in range(num_tasks[j2]):
+                    if (j!= j2):
+                        combinations = list(itertools.product([v for v in range(0, num_preferences[j][t])],
+                                                              [v for v in range(0, num_preferences[j2][t2])]))
+                        for combination in combinations:
+                            a = combination[0]
+                            b = combination[1]
+                            if (jobs[j][t][a][1]==jobs[j2][t2][b][1]):
+                                m += ((preference[j][t][a]*ends[j][t]) <= (preference[j2][t2][b]*starts[j2][t2])) | ((preference[j2][t2][b]*ends[j2][t2]) <= (preference[j][t][a]*starts[j][t]))
+    for i in range(0, num_jobs):
+        for t in range(num_tasks[i] - 1):
+            m += [starts[i][t + 1] >= ends[i][t]]
+    for i in range(0, num_jobs):
+        m += starts[i][0] >= release_times[i]
+    return m
+def tardiness_constraints(m, num_jobs, tardiness, due_dates):
+    for j in range(num_jobs):
+        m += (tardiness[j] == max([ends[j][(num_tasks[j] -1)] - due_dates[j], 0]))
+    return m
+# define quantity constraints
+def define_quantity_constraints(m, num_jobs, num_tasks, num_preferences, quantities_per_job, jobs):
+    for i in range(0, num_jobs):
+        for j in range(0, num_tasks[i]):
+            for k in range(0,num_preferences[i][j]):
+                if jobs[i][j][k][1]==13:
+                    if (quantities_per_job[i]=='small'):
+                        m += (preference[i][j][k]==1)
+                    else:
+                        m += (preference[i][j][k]==0)
+    for i in range(0, num_jobs):
+        for j in range(0, num_tasks[i]):
+            for k in range(0,num_preferences[i][j]):
+                if jobs[i][j][k][1]==16:
+                    if (quantities_per_job[i]=='very_small'):
+                        m += (preference[i][j][k]==1)
+                    else:
+                        m += (preference[i][j][k]==0)
+    return m
+# define objective
+def objective(m, tardiness):
+    m.minimize(max(tardiness))
+    return m
+# define visualization
+def visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs):
+    df = pd.DataFrame(columns=('Start', 'End', 'Machine', 'Job', 'Name'))
+    for job_id in range(0, num_jobs):
+            for task_id in range(num_tasks[job_id]):
+                for alt_id in range(num_preferences[job_id][task_id]):
+                    if ((preference[job_id][task_id][alt_id]).value()):
+                        machine = jobs[job_id][task_id][alt_id][1]
+                        selected = alt_id
+                df.loc[ len(df) ] = [(starts[job_id][task_id]).value(), (ends[job_id][task_id]).value(),
+                                     machine, f""Job {job_id}"", f""task {job_id} {task_id}""]
+                print(
+                    ""  task_%i_%i starts at %i (alt %i, machine %i, duration %i)""
+                    % (job_id, task_id, (starts[job_id][task_id]).value(), selected, machine,
+                       (duration[job_id][task_id]).value())
+                )
+    df['Time'] = df['End'] - df['Start']  # Length on x-axis
+
+    fig = px.bar(df, orientation='h',
+                 base=""Start"", x=""Time"", y=""Machine"", color=""Job"", text=""Name"")
+    for i in range(len(fig['data'])):
+        fig['data'][i].width = 5
+    fig.show() 
+# solve
+(model, (starts, ends, tardiness)) = get_model(horizon, num_tasks, num_jobs)
+model = define_preference_constraints(jobs, model)
+model = define_overlapping_constraints(model, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times)
+model = define_quantity_constraints(model, num_jobs, num_tasks, num_preferences, quantities_per_job, jobs)
+model = tardiness_constraints(model, num_jobs, tardiness, due_dates)
+model = objective(model, tardiness)
+sat = model.solve()
+if not sat: raise Exception(""No solution found."")
+
+# output
+print(""Max Tardiness:"", max(tardiness.value()))
+print(""Start times:"", [list(s.value()) for s in starts])
+print(""End times:"", [list(e.value()) for e in ends])
+# visualize
+visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs)",3,35,"
+# imports
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from cpmpy import *
+import random
+import itertools
+from itertools import permutations
+from pathlib import Path
+import ast
+# configurations
+random.seed(1)
+duration = []
+preference = []
+maximum_release_time = 5
+due_date_allowance = 1.3
+quantity_types = ['very_small','small', 'large']
+machines = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,
+            20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,37,38,39,40,41,42,43,44]
+# quantity related utility functions
+def special_adjustment_for_machine_13(jobs, num_jobs, machines):
+    for i in range(0, num_jobs):
+        for j in range(0, len(jobs[i])):
+            for k in range(0,len(jobs[i][j])):
+                if jobs[i][j][k][1]==13:
+                    if (quantities_per_job[i]!='small'):
+                        for machine in machines:
+                            if machine!= 13 and machine!= 16:
+                                jobs[i][j].append((jobs[i][j][k][0], machine))
+    return jobs
+def special_adjustment_for_machine_16(jobs, num_jobs, machines):
+    for i in range(0, num_jobs):
+        for j in range(0, len(jobs[i])):
+            for k in range(0,len(jobs[i][j])):
+                if jobs[i][j][k][1]==16:
+                    if (quantities_per_job[i]!='very_small'):
+                        for machine in machines:
+                            if machine!= 16:
+                                jobs[i][j].append((jobs[i][j][k][0], machine))
+    return jobs
+# utility functions
+def get_jobs():
+    # data input, each job have several operations and each operation can be processed by one of the alternative machines.
+    return ast.literal_eval(Path('source-quantity.txt').read_text())
+def get_job_count(jobs):
+    return len(jobs)
+def get_quantities_per_job(num_jobs, quantity_types):
+    quantities_per_job = []
+    for i in range(0, num_jobs):
+        quantities_per_job.append(quantity_types[random.randint(0, len(quantity_types)-1)])
+    return quantities_per_job
+def get_number_of_tasks(jobs, num_jobs):
+    return [len(jobs[i]) for i in range(0, num_jobs)]
+def get_number_of_preferences(jobs, num_tasks, num_jobs):
+    return [[len(jobs[i][j]) for j in range(0, num_tasks[i])] for i in range(0, num_jobs)]
+def get_due_dates(due_date_allowance, maximum_durations):
+    return (0 + due_date_allowance*np.asarray(maximum_durations)).astype(int).tolist()
+def get_release_times(num_jobs, maximum_release_time):
+    release_times = []
+    for i in range(0, num_jobs):
+        release_times.append(random.randint(0, maximum_release_time))
+    return release_times
+def get_horizon(jobs, release_times):
+    horizon = 0 # maximum time to process all jobs (use the )
+    for job in jobs:
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            horizon += max_task_duration
+    return (horizon + sum(release_times))
+# tardiness related utility functions
+def get_maximum_durations(jobs):
+    maximum_durations = []
+    for job in jobs:
+        maximum_duration_per_job = []
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            maximum_duration_per_job.append(max_task_duration)
+        maximum_durations.append(np.sum(maximum_duration_per_job))   
+    return maximum_durations
+# data preparation
+jobs = get_jobs()
+num_jobs = get_job_count(jobs)
+quantities_per_job = get_quantities_per_job(num_jobs, quantity_types)
+jobs = special_adjustment_for_machine_13(jobs, num_jobs, machines)
+jobs = special_adjustment_for_machine_16(jobs, num_jobs, machines)
+num_tasks = get_number_of_tasks(jobs, num_jobs)
+num_preferences = get_number_of_preferences(jobs, num_tasks, num_jobs)
+maximum_durations = get_maximum_durations(jobs)
+due_dates = get_due_dates(due_date_allowance, maximum_durations)
+release_times = get_release_times(num_jobs, maximum_release_time)
+horizon = get_horizon(jobs, release_times)
+# define model
+def get_model(horizon, num_tasks, num_jobs):
+    starts = [intvar(0, horizon, shape=num_tasks[i], name=f""start_{i}"") for i in range(0, num_jobs)]
+    ends = [intvar(0, horizon, shape=num_tasks[i], name=f""end_{i}"") for i in range(0, num_jobs)]
+    tardiness = intvar(0, horizon, shape=(num_jobs), name=""tardiness"")
+    m = Model()
+    return m, (starts, ends, tardiness)
+# define preference constraints
+def define_preference_constraints(jobs, m):
+    i=0
+    j=0
+    for job in jobs:
+        temp_dur = []
+        temp_st = []
+        temp_en = []
+        temp_pref = []
+        j=0
+        for task in job:
+            min_duration = task[0][0]
+            max_duration = task[0][0]
+            k=0
+            temp_choice = []
+            for choice in task:
+                min_duration = min([min_duration, choice[0]])
+                max_duration = max([max_duration, choice[0]])
+                t_c = boolvar(shape=1, name=f""ch_{i}_{j}_{k}"")
+                temp_choice.append(t_c)
+                k = k + 1
+            dur = intvar(min_duration, max_duration, shape=1, name=f""dur_{i}_{j}"")
+            b = 0
+            c = 0
+            for a in range(0, len(temp_choice)):
+                b = b + temp_choice[a]
+                c = c + temp_choice[a]*task[a][0]
+            m += (b == 1)
+            m += (c == dur)
+            m += (ends[i][j] == starts[i][j] + dur)
+            temp_dur.append(dur)
+            temp_pref.append(temp_choice)
+            j = j + 1
+        duration.append(temp_dur)
+        preference.append(temp_pref)
+        i = i + 1
+    return m
+# define overlapping constraints
+def define_overlapping_constraints(m, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times):
+    for j in range(num_jobs):
+        for t in range(num_tasks[j]):
+            for j2 in range(num_jobs):
+                for t2 in range(num_tasks[j2]):
+                    if (j!= j2):
+                        combinations = list(itertools.product([v for v in range(0, num_preferences[j][t])],
+                                                              [v for v in range(0, num_preferences[j2][t2])]))
+                        for combination in combinations:
+                            a = combination[0]
+                            b = combination[1]
+                            if (jobs[j][t][a][1]==jobs[j2][t2][b][1]):
+                                m += ((preference[j][t][a]*ends[j][t]) <= (preference[j2][t2][b]*starts[j2][t2])) | ((preference[j2][t2][b]*ends[j2][t2]) <= (preference[j][t][a]*starts[j][t]))
+    for i in range(0, num_jobs):
+        for t in range(num_tasks[i] - 1):
+            m += [starts[i][t + 1] >= ends[i][t]]
+    for i in range(0, num_jobs):
+        m += starts[i][0] >= release_times[i]
+    return m
+# define quantity constraints
+def define_quantity_constraints(m, num_jobs, num_tasks, num_preferences, quantities_per_job, jobs):
+    for i in range(0, num_jobs):
+        for j in range(0, num_tasks[i]):
+            for k in range(0,num_preferences[i][j]):
+                if jobs[i][j][k][1]==13:
+                    if (quantities_per_job[i]=='small'):
+                        m += (preference[i][j][k]==1)
+                    else:
+                        m += (preference[i][j][k]==0)
+    for i in range(0, num_jobs):
+        for j in range(0, num_tasks[i]):
+            for k in range(0,num_preferences[i][j]):
+                if jobs[i][j][k][1]==16:
+                    if (quantities_per_job[i]=='very_small'):
+                        m += (preference[i][j][k]==1)
+                    else:
+                        m += (preference[i][j][k]==0)
+    return m
+#
+def tardiness_constraints(m, num_jobs, tardiness, due_dates):
+    for j in range(num_jobs):
+        m += (tardiness[j] == max([ends[j][(num_tasks[j] -1)] - due_dates[j], 0]))
+    return m
+# define objective
+def objective(m, tardiness):
+    m.minimize(max(tardiness))
+    return m
+# define visualization
+def visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs):
+    df = pd.DataFrame(columns=('Start', 'End', 'Machine', 'Job', 'Name'))
+    for job_id in range(0, num_jobs):
+            for task_id in range(num_tasks[job_id]):
+                for alt_id in range(num_preferences[job_id][task_id]):
+                    if ((preference[job_id][task_id][alt_id]).value()):
+                        machine = jobs[job_id][task_id][alt_id][1]
+                        selected = alt_id
+                df.loc[ len(df) ] = [(starts[job_id][task_id]).value(), (ends[job_id][task_id]).value(),
+                                     machine, f""Job {job_id}"", f""task {job_id} {task_id}""]
+                print(
+                    ""  task_%i_%i starts at %i (alt %i, machine %i, duration %i)""
+                    % (job_id, task_id, (starts[job_id][task_id]).value(), selected, machine,
+                       (duration[job_id][task_id]).value())
+                )
+    df['Time'] = df['End'] - df['Start']  # Length on x-axis
+
+    fig = px.bar(df, orientation='h',
+                 base=""Start"", x=""Time"", y=""Machine"", color=""Job"", text=""Name"")
+    for i in range(len(fig['data'])):
+        fig['data'][i].width = 5
+    fig.show() 
+# solve
+(model, (starts, ends, tardiness)) = get_model(horizon, num_tasks, num_jobs)
+model = define_preference_constraints(jobs, model)
+model = define_overlapping_constraints(model, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times)
+model = define_quantity_constraints(model, num_jobs, num_tasks, num_preferences, quantities_per_job, jobs)
+model = tardiness_constraints(model, num_jobs, tardiness, due_dates)
+model = objective(model, tardiness)
+sat = model.solve()
+if not sat: raise Exception(""No solution found."")
+
+# output
+print(""Max Tardiness:"", max(tardiness.value()))
+print(""Start times:"", [list(s.value()) for s in starts])
+print(""End times:"", [list(e.value()) for e in ends])
+# visualize
+visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs)"
+"Our objective is to devise an optimized schedule for Shiny Factory, aiming to minimize maximum tardiness. The job specifications, categorized by quantity labels (very small, small, and large), are detailed in the source-quantity.txt file. We've designated the Little Fang Machine for very small jobs and the 7-Head Machine for small ones. However, if a job's quantity exceeds a machine's capacity, it won't be processed by that machine. Due dates for jobs are calculated by multiplying each job's total processing time by a due date allowance factor of 1.3, adding to the scheduling complexity. Moreover, the stochastic nature of job release times further complicates the optimization process. Once we successfully address these challenges, it's imperative to ensure comprehensive documentation and visual representation of the solutions for thorough evaluation and future","# imports
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from cpmpy import *
+import random
+import itertools
+from itertools import permutations
+from pathlib import Path
+import ast
+# configurations
+random.seed(1)
+duration = []
+preference = []
+maximum_release_time = 5
+due_date_allowance = 1.3
+quantity_types = ['very_small', 'small', 'large']
+machines = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,
+            20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,37,38,39,40,41,42,43,44]
+# utility functions
+def get_jobs():
+    # data input, each job have several operations and each operation can be processed by one of the alternative machines.
+    return ast.literal_eval(Path('source-quantity.txt').read_text())
+def get_job_count(jobs):
+    return len(jobs)
+def get_quantities_per_job(num_jobs, quantity_types):
+    quantities_per_job = []
+    for i in range(0, num_jobs):
+        quantities_per_job.append(quantity_types[random.randint(0, len(quantity_types)-1)])
+    return quantities_per_job
+# quantity related utility functions
+def special_adjustment_for_machine_13(jobs, num_jobs, machines):
+    for i in range(0, num_jobs):
+        for j in range(0, len(jobs[i])):
+            for k in range(0,len(jobs[i][j])):
+                if jobs[i][j][k][1]==13:
+                    if (quantities_per_job[i]!='small'):
+                        for machine in machines:
+                            if machine != 13 and machine != 16:
+                                jobs[i][j].append((jobs[i][j][k][0], machine))
+    return jobs
+def special_adjustment_for_machine_16(jobs, num_jobs, machines):
+    for i in range(0, num_jobs):
+        for j in range(0, len(jobs[i])):
+            for k in range(0,len(jobs[i][j])):
+                if jobs[i][j][k][1]==16:
+                    if (quantities_per_job[i]!='very_small'):
+                        for machine in machines:
+                            if machine != 16:
+                                jobs[i][j].append((jobs[i][j][k][0], machine))
+    return jobs
+def get_number_of_tasks(jobs, num_jobs):
+    return [len(jobs[i]) for i in range(0, num_jobs)]
+def get_number_of_preferences(jobs, num_tasks, num_jobs):
+    return [[len(jobs[i][j]) for j in range(0, num_tasks[i])] for i in range(0, num_jobs)]
+def get_due_dates(due_date_allowance, maximum_durations):
+    return (0 + due_date_allowance*np.asarray(maximum_durations)).astype(int).tolist()
+def get_release_times(num_jobs, maximum_release_time):
+    release_times = []
+    for i in range(0, num_jobs):
+        release_times.append(random.randint(0, maximum_release_time))
+    return release_times
+def get_horizon(jobs, release_times):
+    horizon = 0 # maximum time to process all jobs (use the )
+    for job in jobs:
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            horizon += max_task_duration
+    return (horizon + sum(release_times))
+# tardiness related utility functions
+def get_maximum_durations(jobs):
+    maximum_durations = []
+    for job in jobs:
+        maximum_duration_per_job = []
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            maximum_duration_per_job.append(max_task_duration)
+        maximum_durations.append(np.sum(maximum_duration_per_job))   
+    return maximum_durations
+# data preparation
+jobs = get_jobs()
+num_jobs = get_job_count(jobs)
+quantities_per_job = get_quantities_per_job(num_jobs, quantity_types)
+jobs = special_adjustment_for_machine_13(jobs, num_jobs, machines)
+jobs = special_adjustment_for_machine_16(jobs, num_jobs, machines)
+num_tasks = get_number_of_tasks(jobs, num_jobs)
+num_preferences = get_number_of_preferences(jobs, num_tasks, num_jobs)
+maximum_durations = get_maximum_durations(jobs)
+due_dates = get_due_dates(due_date_allowance, maximum_durations)
+release_times = get_release_times(num_jobs, maximum_release_time)
+horizon = get_horizon(jobs, release_times)
+# define model
+def get_model(horizon, num_tasks, num_jobs):
+    starts = [intvar(0, horizon, shape=num_tasks[i], name=f""start_{i}"") for i in range(0, num_jobs)]
+    ends = [intvar(0, horizon, shape=num_tasks[i], name=f""end_{i}"") for i in range(0, num_jobs)]
+    tardiness = intvar(0, horizon, shape=(num_jobs), name=""tardiness"")
+    m = Model()
+    return m, (starts, ends, tardiness)
+# define preference constraints
+def define_preference_constraints(jobs, m):
+    i=0
+    j=0
+    for job in jobs:
+        temp_dur = []
+        temp_st = []
+        temp_en = []
+        temp_pref = []
+        j=0
+        for task in job:
+            min_duration = task[0][0]
+            max_duration = task[0][0]
+            k=0
+            temp_choice = []
+            for choice in task:
+                min_duration = min([min_duration, choice[0]])
+                max_duration = max([max_duration, choice[0]])
+                t_c = boolvar(shape=1, name=f""ch_{i}_{j}_{k}"")
+                temp_choice.append(t_c)
+                k = k + 1
+            dur = intvar(min_duration, max_duration, shape=1, name=f""dur_{i}_{j}"")
+            b = 0
+            c = 0
+            for a in range(0, len(temp_choice)):
+                b = b + temp_choice[a]
+                c = c + temp_choice[a]*task[a][0]
+            m += (b == 1)
+            m += (c == dur)
+            m += (ends[i][j] == starts[i][j] + dur)
+            temp_dur.append(dur)
+            temp_pref.append(temp_choice)
+            j = j + 1
+        duration.append(temp_dur)
+        preference.append(temp_pref)
+        i = i + 1
+    return m
+# define overlapping constraints
+def define_overlapping_constraints(m, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times):
+    for j in range(num_jobs):
+        for t in range(num_tasks[j]):
+            for j2 in range(num_jobs):
+                for t2 in range(num_tasks[j2]):
+                    if (j!= j2):
+                        combinations = list(itertools.product([v for v in range(0, num_preferences[j][t])],
+                                                              [v for v in range(0, num_preferences[j2][t2])]))
+                        for combination in combinations:
+                            a = combination[0]
+                            b = combination[1]
+                            if (jobs[j][t][a][1]==jobs[j2][t2][b][1]):
+                                m += ((preference[j][t][a]*ends[j][t]) <= (preference[j2][t2][b]*starts[j2][t2])) | ((preference[j2][t2][b]*ends[j2][t2]) <= (preference[j][t][a]*starts[j][t]))
+    for i in range(0, num_jobs):
+        for t in range(num_tasks[i] - 1):
+            m += [starts[i][t + 1] >= ends[i][t]]
+    for i in range(0, num_jobs):
+        m += starts[i][0] >= release_times[i]
+    return m
+def tardiness_constraints(m, num_jobs, tardiness, due_dates):
+    for j in range(num_jobs):
+        m += (tardiness[j] == max([ends[j][(num_tasks[j] -1)] - due_dates[j], 0]))
+    return m
+# define quantity constraints
+def define_quantity_constraints(m, num_jobs, num_tasks, num_preferences, quantities_per_job, jobs):
+    for i in range(0, num_jobs):
+        for j in range(0, num_tasks[i]):
+            for k in range(0,num_preferences[i][j]):
+                if jobs[i][j][k][1]==13:
+                    if (quantities_per_job[i]=='small'):
+                        m += (preference[i][j][k]==1)
+                    else:
+                        m += (preference[i][j][k]==0)
+    for i in range(0, num_jobs):
+        for j in range(0, num_tasks[i]):
+            for k in range(0,num_preferences[i][j]):
+                if jobs[i][j][k][1]==16:
+                    if (quantities_per_job[i]=='very_small'):
+                        m += (preference[i][j][k]==1)
+                    else:
+                        m += (preference[i][j][k]==0)
+    return m
+# define objective
+def objective(m, tardiness):
+    m.minimize(max(tardiness))
+    return m
+# define visualization
+def visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs):
+    df = pd.DataFrame(columns=('Start', 'End', 'Machine', 'Job', 'Name'))
+    for job_id in range(0, num_jobs):
+            for task_id in range(num_tasks[job_id]):
+                for alt_id in range(num_preferences[job_id][task_id]):
+                    if ((preference[job_id][task_id][alt_id]).value()):
+                        machine = jobs[job_id][task_id][alt_id][1]
+                        selected = alt_id
+                df.loc[ len(df) ] = [(starts[job_id][task_id]).value(), (ends[job_id][task_id]).value(),
+                                     machine, f""Job {job_id}"", f""task {job_id} {task_id}""]
+                print(
+                    ""  task_%i_%i starts at %i (alt %i, machine %i, duration %i)""
+                    % (job_id, task_id, (starts[job_id][task_id]).value(), selected, machine,
+                       (duration[job_id][task_id]).value())
+                )
+    df['Time'] = df['End'] - df['Start']  # Length on x-axis
+
+    fig = px.bar(df, orientation='h',
+                 base=""Start"", x=""Time"", y=""Machine"", color=""Job"", text=""Name"")
+    for i in range(len(fig['data'])):
+        fig['data'][i].width = 5
+    fig.show() 
+# solve
+(model, (starts, ends, tardiness)) = get_model(horizon, num_tasks, num_jobs)
+model = define_preference_constraints(jobs, model)
+model = define_overlapping_constraints(model, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times)
+model = define_quantity_constraints(model, num_jobs, num_tasks, num_preferences, quantities_per_job, jobs)
+model = tardiness_constraints(model, num_jobs, tardiness, due_dates)
+model = objective(model, tardiness)
+sat = model.solve()
+if not sat: raise Exception(""No solution found."")
+
+# output
+print(""Max Tardiness:"", max(tardiness.value()))
+print(""Start times:"", [list(s.value()) for s in starts])
+print(""End times:"", [list(e.value()) for e in ends])
+# visualize
+visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs)",3,36,"
+# imports
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from cpmpy import *
+import random
+import itertools
+from itertools import permutations
+from pathlib import Path
+import ast
+# configurations
+random.seed(1)
+duration = []
+preference = []
+maximum_release_time = 5
+due_date_allowance = 1.3
+quantity_types = ['very_small','small', 'large']
+machines = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,
+            20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,37,38,39,40,41,42,43,44]
+# quantity related utility functions
+def special_adjustment_for_machine_13(jobs, num_jobs, machines):
+    for i in range(0, num_jobs):
+        for j in range(0, len(jobs[i])):
+            for k in range(0,len(jobs[i][j])):
+                if jobs[i][j][k][1]==13:
+                    if (quantities_per_job[i]!='small'):
+                        for machine in machines:
+                            if machine!= 13 and machine!= 16:
+                                jobs[i][j].append((jobs[i][j][k][0], machine))
+    return jobs
+def special_adjustment_for_machine_16(jobs, num_jobs, machines):
+    for i in range(0, num_jobs):
+        for j in range(0, len(jobs[i])):
+            for k in range(0,len(jobs[i][j])):
+                if jobs[i][j][k][1]==16:
+                    if (quantities_per_job[i]!='very_small'):
+                        for machine in machines:
+                            if machine!= 16:
+                                jobs[i][j].append((jobs[i][j][k][0], machine))
+    return jobs
+# utility functions
+def get_jobs():
+    # data input, each job have several operations and each operation can be processed by one of the alternative machines.
+    return ast.literal_eval(Path('source-quantity.txt').read_text())
+def get_job_count(jobs):
+    return len(jobs)
+def get_quantities_per_job(num_jobs, quantity_types):
+    quantities_per_job = []
+    for i in range(0, num_jobs):
+        quantities_per_job.append(quantity_types[random.randint(0, len(quantity_types)-1)])
+    return quantities_per_job
+def get_number_of_tasks(jobs, num_jobs):
+    return [len(jobs[i]) for i in range(0, num_jobs)]
+def get_number_of_preferences(jobs, num_tasks, num_jobs):
+    return [[len(jobs[i][j]) for j in range(0, num_tasks[i])] for i in range(0, num_jobs)]
+def get_due_dates(due_date_allowance, maximum_durations):
+    return (0 + due_date_allowance*np.asarray(maximum_durations)).astype(int).tolist()
+def get_release_times(num_jobs, maximum_release_time):
+    release_times = []
+    for i in range(0, num_jobs):
+        release_times.append(random.randint(0, maximum_release_time))
+    return release_times
+def get_horizon(jobs, release_times):
+    horizon = 0 # maximum time to process all jobs (use the )
+    for job in jobs:
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            horizon += max_task_duration
+    return (horizon + sum(release_times))
+# tardiness related utility functions
+def get_maximum_durations(jobs):
+    maximum_durations = []
+    for job in jobs:
+        maximum_duration_per_job = []
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            maximum_duration_per_job.append(max_task_duration)
+        maximum_durations.append(np.sum(maximum_duration_per_job))   
+    return maximum_durations
+# data preparation
+jobs = get_jobs()
+num_jobs = get_job_count(jobs)
+quantities_per_job = get_quantities_per_job(num_jobs, quantity_types)
+jobs = special_adjustment_for_machine_13(jobs, num_jobs, machines)
+jobs = special_adjustment_for_machine_16(jobs, num_jobs, machines)
+num_tasks = get_number_of_tasks(jobs, num_jobs)
+num_preferences = get_number_of_preferences(jobs, num_tasks, num_jobs)
+maximum_durations = get_maximum_durations(jobs)
+due_dates = get_due_dates(due_date_allowance, maximum_durations)
+release_times = get_release_times(num_jobs, maximum_release_time)
+horizon = get_horizon(jobs, release_times)
+# define model
+def get_model(horizon, num_tasks, num_jobs):
+    starts = [intvar(0, horizon, shape=num_tasks[i], name=f""start_{i}"") for i in range(0, num_jobs)]
+    ends = [intvar(0, horizon, shape=num_tasks[i], name=f""end_{i}"") for i in range(0, num_jobs)]
+    tardiness = intvar(0, horizon, shape=(num_jobs), name=""tardiness"")
+    m = Model()
+    return m, (starts, ends, tardiness)
+# define preference constraints
+def define_preference_constraints(jobs, m):
+    i=0
+    j=0
+    for job in jobs:
+        temp_dur = []
+        temp_st = []
+        temp_en = []
+        temp_pref = []
+        j=0
+        for task in job:
+            min_duration = task[0][0]
+            max_duration = task[0][0]
+            k=0
+            temp_choice = []
+            for choice in task:
+                min_duration = min([min_duration, choice[0]])
+                max_duration = max([max_duration, choice[0]])
+                t_c = boolvar(shape=1, name=f""ch_{i}_{j}_{k}"")
+                temp_choice.append(t_c)
+                k = k + 1
+            dur = intvar(min_duration, max_duration, shape=1, name=f""dur_{i}_{j}"")
+            b = 0
+            c = 0
+            for a in range(0, len(temp_choice)):
+                b = b + temp_choice[a]
+                c = c + temp_choice[a]*task[a][0]
+            m += (b == 1)
+            m += (c == dur)
+            m += (ends[i][j] == starts[i][j] + dur)
+            temp_dur.append(dur)
+            temp_pref.append(temp_choice)
+            j = j + 1
+        duration.append(temp_dur)
+        preference.append(temp_pref)
+        i = i + 1
+    return m
+# define overlapping constraints
+def define_overlapping_constraints(m, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times):
+    for j in range(num_jobs):
+        for t in range(num_tasks[j]):
+            for j2 in range(num_jobs):
+                for t2 in range(num_tasks[j2]):
+                    if (j!= j2):
+                        combinations = list(itertools.product([v for v in range(0, num_preferences[j][t])],
+                                                              [v for v in range(0, num_preferences[j2][t2])]))
+                        for combination in combinations:
+                            a = combination[0]
+                            b = combination[1]
+                            if (jobs[j][t][a][1]==jobs[j2][t2][b][1]):
+                                m += ((preference[j][t][a]*ends[j][t]) <= (preference[j2][t2][b]*starts[j2][t2])) | ((preference[j2][t2][b]*ends[j2][t2]) <= (preference[j][t][a]*starts[j][t]))
+    for i in range(0, num_jobs):
+        for t in range(num_tasks[i] - 1):
+            m += [starts[i][t + 1] >= ends[i][t]]
+    for i in range(0, num_jobs):
+        m += starts[i][0] >= release_times[i]
+    return m
+# define quantity constraints
+def define_quantity_constraints(m, num_jobs, num_tasks, num_preferences, quantities_per_job, jobs):
+    for i in range(0, num_jobs):
+        for j in range(0, num_tasks[i]):
+            for k in range(0,num_preferences[i][j]):
+                if jobs[i][j][k][1]==13:
+                    if (quantities_per_job[i]=='small'):
+                        m += (preference[i][j][k]==1)
+                    else:
+                        m += (preference[i][j][k]==0)
+    for i in range(0, num_jobs):
+        for j in range(0, num_tasks[i]):
+            for k in range(0,num_preferences[i][j]):
+                if jobs[i][j][k][1]==16:
+                    if (quantities_per_job[i]=='very_small'):
+                        m += (preference[i][j][k]==1)
+                    else:
+                        m += (preference[i][j][k]==0)
+    return m
+#
+def tardiness_constraints(m, num_jobs, tardiness, due_dates):
+    for j in range(num_jobs):
+        m += (tardiness[j] == max([ends[j][(num_tasks[j] -1)] - due_dates[j], 0]))
+    return m
+# define objective
+def objective(m, tardiness):
+    m.minimize(max(tardiness))
+    return m
+# define visualization
+def visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs):
+    df = pd.DataFrame(columns=('Start', 'End', 'Machine', 'Job', 'Name'))
+    for job_id in range(0, num_jobs):
+            for task_id in range(num_tasks[job_id]):
+                for alt_id in range(num_preferences[job_id][task_id]):
+                    if ((preference[job_id][task_id][alt_id]).value()):
+                        machine = jobs[job_id][task_id][alt_id][1]
+                        selected = alt_id
+                df.loc[ len(df) ] = [(starts[job_id][task_id]).value(), (ends[job_id][task_id]).value(),
+                                     machine, f""Job {job_id}"", f""task {job_id} {task_id}""]
+                print(
+                    ""  task_%i_%i starts at %i (alt %i, machine %i, duration %i)""
+                    % (job_id, task_id, (starts[job_id][task_id]).value(), selected, machine,
+                       (duration[job_id][task_id]).value())
+                )
+    df['Time'] = df['End'] - df['Start']  # Length on x-axis
+
+    fig = px.bar(df, orientation='h',
+                 base=""Start"", x=""Time"", y=""Machine"", color=""Job"", text=""Name"")
+    for i in range(len(fig['data'])):
+        fig['data'][i].width = 5
+    fig.show() 
+# solve
+(model, (starts, ends, tardiness)) = get_model(horizon, num_tasks, num_jobs)
+model = define_preference_constraints(jobs, model)
+model = define_overlapping_constraints(model, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times)
+model = define_quantity_constraints(model, num_jobs, num_tasks, num_preferences, quantities_per_job, jobs)
+model = tardiness_constraints(model, num_jobs, tardiness, due_dates)
+model = objective(model, tardiness)
+sat = model.solve()
+if not sat: raise Exception(""No solution found."")
+
+# output
+print(""Max Tardiness:"", max(tardiness.value()))
+print(""Start times:"", [list(s.value()) for s in starts])
+print(""End times:"", [list(e.value()) for e in ends])
+# visualize
+visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs)"
+"We're working on developing a schedule for Shiny Factory with the main goal of minimizing maximum tardiness. The job details are in source.txt. The challenge is that due dates are calculated based on the total processing time of each job, multiplied by a due date allowance factor of 1.3, and the jobs have random release times. Once we've resolved this, please ensure the solutions are documented and visually presented for a comprehensive evaluation.","# imports
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from cpmpy import *
+import random
+import itertools
+from itertools import permutations
+from pathlib import Path
+import ast
+# configurations
+random.seed(1)
+duration = []
+preference = []
+maximum_release_time = 5
+due_date_allowance = 1.3
+# utility functions
+def get_jobs():
+    # data input, each job have several operations and each operation can be processed by one of the alternative machines.
+    return ast.literal_eval(Path('source.txt').read_text())
+def get_job_count(jobs):
+    return len(jobs)
+def get_number_of_tasks(jobs, num_jobs):
+    return [len(jobs[i]) for i in range(0, num_jobs)]
+def get_number_of_preferences(jobs, num_tasks, num_jobs):
+    return [[len(jobs[i][j]) for j in range(0, num_tasks[i])] for i in range(0, num_jobs)]
+def get_due_dates(due_date_allowance, maximum_durations):
+    return (0 + due_date_allowance*np.asarray(maximum_durations)).astype(int).tolist()
+def get_release_times(num_jobs, maximum_release_time):
+    release_times = []
+    for i in range(0, num_jobs):
+        release_times.append(random.randint(0, maximum_release_time))
+    return release_times
+def get_horizon(jobs, release_times):
+    horizon = 0 # maximum time to process all jobs (use the )
+    for job in jobs:
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            horizon += max_task_duration
+    return (horizon + sum(release_times))
+# tardiness related utility functions
+def get_maximum_durations(jobs):
+    maximum_durations = []
+    for job in jobs:
+        maximum_duration_per_job = []
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            maximum_duration_per_job.append(max_task_duration)
+        maximum_durations.append(np.sum(maximum_duration_per_job))   
+    return maximum_durations
+# data preparation
+jobs = get_jobs()
+num_jobs = get_job_count(jobs)
+num_tasks = get_number_of_tasks(jobs, num_jobs)
+num_preferences = get_number_of_preferences(jobs, num_tasks, num_jobs)
+maximum_durations = get_maximum_durations(jobs)
+due_dates = get_due_dates(due_date_allowance, maximum_durations)
+release_times = get_release_times(num_jobs, maximum_release_time)
+horizon = get_horizon(jobs, release_times)
+# define model
+def get_model(horizon, num_tasks, num_jobs):
+    starts = [intvar(0, horizon, shape=num_tasks[i], name=f""start_{i}"") for i in range(0, num_jobs)]
+    ends = [intvar(0, horizon, shape=num_tasks[i], name=f""end_{i}"") for i in range(0, num_jobs)]
+    tardiness = intvar(0, horizon, shape=(num_jobs), name=""tardiness"")
+    m = Model()
+    return m, (starts, ends, tardiness)
+# define constraints
+def define_preference_constraints(jobs, m):
+    i=0
+    j=0
+    for job in jobs:
+        temp_dur = []
+        temp_st = []
+        temp_en = []
+        temp_pref = []
+        j=0
+        for task in job:
+            min_duration = task[0][0]
+            max_duration = task[0][0]
+            k=0
+            temp_choice = []
+            for choice in task:
+                min_duration = min([min_duration, choice[0]])
+                max_duration = max([max_duration, choice[0]])
+                t_c = boolvar(shape=1, name=f""ch_{i}_{j}_{k}"")
+                temp_choice.append(t_c)
+                k = k + 1
+            dur = intvar(min_duration, max_duration, shape=1, name=f""dur_{i}_{j}"")
+            b = 0
+            c = 0
+            for a in range(0, len(temp_choice)):
+                b = b + temp_choice[a]
+                c = c + temp_choice[a]*task[a][0]
+            m += (b == 1)
+            m += (c == dur)
+            m += (ends[i][j] == starts[i][j] + dur)
+            temp_dur.append(dur)
+            temp_pref.append(temp_choice)
+            j = j + 1
+        duration.append(temp_dur)
+        preference.append(temp_pref)
+        i = i + 1
+    return m
+def define_overlapping_constraints(m, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times):
+    for j in range(num_jobs):
+        for t in range(num_tasks[j]):
+            for j2 in range(num_jobs):
+                for t2 in range(num_tasks[j2]):
+                    if (j!= j2):
+                        combinations = list(itertools.product([v for v in range(0, num_preferences[j][t])],
+                                                              [v for v in range(0, num_preferences[j2][t2])]))
+                        for combination in combinations:
+                            a = combination[0]
+                            b = combination[1]
+                            if (jobs[j][t][a][1]==jobs[j2][t2][b][1]):
+                                m += ((preference[j][t][a]*ends[j][t]) <= (preference[j2][t2][b]*starts[j2][t2])) | ((preference[j2][t2][b]*ends[j2][t2]) <= (preference[j][t][a]*starts[j][t]))
+    for i in range(0, num_jobs):
+        for t in range(num_tasks[i] - 1):
+            m += [starts[i][t + 1] >= ends[i][t]]
+    for i in range(0, num_jobs):
+        m += starts[i][0] >= release_times[i]
+    return m
+def tardiness_constraints(m, num_jobs, tardiness, due_dates):
+    for j in range(num_jobs):
+        m += (tardiness[j] == max([ends[j][(num_tasks[j] -1)] - due_dates[j], 0]))
+    return m
+# define objective
+def objective(m, tardiness):
+    m.minimize(max(tardiness))
+    return m
+# define visualization
+def visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs):
+    df = pd.DataFrame(columns=('Start', 'End', 'Machine', 'Job', 'Name'))
+    for job_id in range(0, num_jobs):
+            for task_id in range(num_tasks[job_id]):
+                for alt_id in range(num_preferences[job_id][task_id]):
+                    if ((preference[job_id][task_id][alt_id]).value()):
+                        machine = jobs[job_id][task_id][alt_id][1]
+                        selected = alt_id
+                df.loc[ len(df) ] = [(starts[job_id][task_id]).value(), (ends[job_id][task_id]).value(),
+                                     machine, f""Job {job_id}"", f""task {job_id} {task_id}""]
+                print(
+                    ""  task_%i_%i starts at %i (alt %i, machine %i, duration %i)""
+                    % (job_id, task_id, (starts[job_id][task_id]).value(), selected, machine,
+                       (duration[job_id][task_id]).value())
+                )
+    df['Time'] = df['End'] - df['Start']  # Length on x-axis
+
+    fig = px.bar(df, orientation='h',
+                 base=""Start"", x=""Time"", y=""Machine"", color=""Job"", text=""Name"")
+    for i in range(len(fig['data'])):
+        fig['data'][i].width = 5
+    fig.show() 
+# solve
+(model, (starts, ends, tardiness)) = get_model(horizon, num_tasks, num_jobs)
+model = define_preference_constraints(jobs, model)
+model = define_overlapping_constraints(model, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times)
+model = tardiness_constraints(model, num_jobs, tardiness, due_dates)
+model = objective(model, tardiness)
+sat = model.solve()
+if not sat: raise Exception(""No solution found."")
+
+# output
+print(""Max Tardiness:"", max(tardiness.value()))
+print(""Start times:"", [list(s.value()) for s in starts])
+print(""End times:"", [list(e.value()) for e in ends])
+# visualize
+visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs)",4,23,"
+# imports
+import numpy as np
+import pandas as pd
+import plotly.express as px
+from cpmpy import *
+import random
+import itertools
+from itertools import permutations
+from pathlib import Path
+import ast
+# configurations
+random.seed(1)
+duration = []
+preference = []
+maximum_release_time = 5
+due_date_allowance = 1.3
+#
+#
+# utility functions
+def get_jobs():
+    # data input, each job have several operations and each operation can be processed by one of the alternative machines.
+    return ast.literal_eval(Path('source.txt').read_text())
+def get_job_count(jobs):
+    return len(jobs)
+def get_number_of_tasks(jobs, num_jobs):
+    return [len(jobs[i]) for i in range(0, num_jobs)]
+def get_number_of_preferences(jobs, num_tasks, num_jobs):
+    return [[len(jobs[i][j]) for j in range(0, num_tasks[i])] for i in range(0, num_jobs)]
+def get_due_dates(due_date_allowance, maximum_durations):
+    return (0 + due_date_allowance*np.asarray(maximum_durations)).astype(int).tolist()
+def get_release_times(num_jobs, maximum_release_time):
+    release_times = []
+    for i in range(0, num_jobs):
+        release_times.append(random.randint(0, maximum_release_time))
+    return release_times
+def get_horizon(jobs, release_times):
+    horizon = 0 # maximum time to process all jobs (use the )
+    for job in jobs:
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            horizon += max_task_duration
+    return (horizon + sum(release_times))
+# tardiness related utility functions
+def get_maximum_durations(jobs):
+    maximum_durations = []
+    for job in jobs:
+        maximum_duration_per_job = []
+        for task in job:
+            max_task_duration = 0
+            for alternative in task:
+                max_task_duration = max([max_task_duration, alternative[0]])
+            maximum_duration_per_job.append(max_task_duration)
+        maximum_durations.append(np.sum(maximum_duration_per_job))   
+    return maximum_durations
+# data preparation
+jobs = get_jobs()
+num_jobs = get_job_count(jobs)
+num_tasks = get_number_of_tasks(jobs, num_jobs)
+num_preferences = get_number_of_preferences(jobs, num_tasks, num_jobs)
+maximum_durations = get_maximum_durations(jobs)
+due_dates = get_due_dates(due_date_allowance, maximum_durations)
+release_times = get_release_times(num_jobs, maximum_release_time)
+horizon = get_horizon(jobs, release_times)
+# define model
+def get_model(horizon, num_tasks, num_jobs):
+    starts = [intvar(0, horizon, shape=num_tasks[i], name=f""start_{i}"") for i in range(0, num_jobs)]
+    ends = [intvar(0, horizon, shape=num_tasks[i], name=f""end_{i}"") for i in range(0, num_jobs)]
+    tardiness = intvar(0, horizon, shape=(num_jobs), name=""tardiness"")
+    m = Model()
+    return m, (starts, ends, tardiness)
+# define constraints
+def define_preference_constraints(jobs, m):
+    i=0
+    j=0
+    for job in jobs:
+        temp_dur = []
+        temp_st = []
+        temp_en = []
+        temp_pref = []
+        j=0
+        for task in job:
+            min_duration = task[0][0]
+            max_duration = task[0][0]
+            k=0
+            temp_choice = []
+            for choice in task:
+                min_duration = min([min_duration, choice[0]])
+                max_duration = max([max_duration, choice[0]])
+                t_c = boolvar(shape=1, name=f""ch_{i}_{j}_{k}"")
+                temp_choice.append(t_c)
+                k = k + 1
+            dur = intvar(min_duration, max_duration, shape=1, name=f""dur_{i}_{j}"")
+            b = 0
+            c = 0
+            for a in range(0, len(temp_choice)):
+                b = b + temp_choice[a]
+                c = c + temp_choice[a]*task[a][0]
+            m += (b == 1)
+            m += (c == dur)
+            m += (ends[i][j] == starts[i][j] + dur)
+            temp_dur.append(dur)
+            temp_pref.append(temp_choice)
+            j = j + 1
+        duration.append(temp_dur)
+        preference.append(temp_pref)
+        i = i + 1
+    return m
+def define_overlapping_constraints(m, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times):
+    for j in range(num_jobs):
+        for t in range(num_tasks[j]):
+            for j2 in range(num_jobs):
+                for t2 in range(num_tasks[j2]):
+                    if (j!= j2):
+                        combinations = list(itertools.product([v for v in range(0, num_preferences[j][t])],
+                                                              [v for v in range(0, num_preferences[j2][t2])]))
+                        for combination in combinations:
+                            a = combination[0]
+                            b = combination[1]
+                            if (jobs[j][t][a][1]==jobs[j2][t2][b][1]):
+                                m += ((preference[j][t][a]*ends[j][t]) <= (preference[j2][t2][b]*starts[j2][t2])) | ((preference[j2][t2][b]*ends[j2][t2]) <= (preference[j][t][a]*starts[j][t]))
+    for i in range(0, num_jobs):
+        for t in range(num_tasks[i] - 1):
+            m += [starts[i][t + 1] >= ends[i][t]]
+    for i in range(0, num_jobs):
+        m += starts[i][0] >= release_times[i]
+    return m
+#
+#
+def tardiness_constraints(m, num_jobs, tardiness, due_dates):
+    for j in range(num_jobs):
+        m += (tardiness[j] == max([ends[j][(num_tasks[j] -1)] - due_dates[j], 0]))
+    return m
+# define objective
+def objective(m, tardiness):
+    m.minimize(max(tardiness))
+    return m
+# define visualization
+def visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs):
+    df = pd.DataFrame(columns=('Start', 'End', 'Machine', 'Job', 'Name'))
+    for job_id in range(0, num_jobs):
+            for task_id in range(num_tasks[job_id]):
+                for alt_id in range(num_preferences[job_id][task_id]):
+                    if ((preference[job_id][task_id][alt_id]).value()):
+                        machine = jobs[job_id][task_id][alt_id][1]
+                        selected = alt_id
+                df.loc[ len(df) ] = [(starts[job_id][task_id]).value(), (ends[job_id][task_id]).value(),
+                                     machine, f""Job {job_id}"", f""task {job_id} {task_id}""]
+                print(
+                    ""  task_%i_%i starts at %i (alt %i, machine %i, duration %i)""
+                    % (job_id, task_id, (starts[job_id][task_id]).value(), selected, machine,
+                       (duration[job_id][task_id]).value())
+                )
+    df['Time'] = df['End'] - df['Start']  # Length on x-axis
+
+    fig = px.bar(df, orientation='h',
+                 base=""Start"", x=""Time"", y=""Machine"", color=""Job"", text=""Name"")
+    for i in range(len(fig['data'])):
+        fig['data'][i].width = 5
+    fig.show() 
+# solve
+(model, (starts, ends, tardiness)) = get_model(horizon, num_tasks, num_jobs)
+model = define_preference_constraints(jobs, model)
+model = define_overlapping_constraints(model, jobs, num_jobs, num_tasks, num_preferences, starts, ends, release_times)
+model = tardiness_constraints(model, num_jobs, tardiness, due_dates)
+model = objective(model, tardiness)
+sat = model.solve()
+if not sat: raise Exception(""No solution found."")
+
+# output
+print(""Max Tardiness:"", max(tardiness.value()))
+print(""Start times:"", [list(s.value()) for s in starts])
+print(""End times:"", [list(e.value()) for e in ends])
+# visualize
+visualize(ends, starts, num_jobs, num_tasks, num_preferences, preference, jobs)"
